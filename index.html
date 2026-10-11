@@ -1,0 +1,1901 @@
+<!DOCTYPE html>
+<!--
+  flowmap.html — Process Flow Mapping Tool
+  =========================================
+  A single-file, zero-dependency process flow mapper. Works fully offline (file://).
+  Usage:
+    • Toolbar: switch Canvas | Matrix | Hybrid mode, add blocks (5 types), undo/redo,
+      zoom, fit, edge style (Square | Curved), export/import.
+    • Canvas mode: drag blocks freely (10px snap grid + alignment guides). Design space.
+    • Matrix mode: pick X/Y axis properties; blocks auto-stack into cells; drag a block
+      into another cell to reassign its properties. Assignment space.
+    • Hybrid mode: strict Y lanes like matrix, but X bands follow the canvas flow order
+      and the X-property label may repeat along the flow. Analysis & tweak space.
+    • Table mode: activities in approximate flow order with all properties as editable
+      fields, including man-hours and assigned resources; time to complete is
+      calculated as man-hours ÷ resources.
+    • Drag from a block's output lead (right circle) onto another block to connect.
+    • Hover a block to trace its upstream (blue) / downstream (green) chains.
+    • Click a block or edge to select; Shift+click or marquee for multi-select; Delete removes.
+    • Ctrl+Z / Ctrl+Y undo/redo, Ctrl+D duplicate, Esc clears selection.
+    • Everything autosaves to localStorage (key "flowmap.v1").
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FlowMap — Free Process Flow Mapping Tool</title>
+<meta name="description" content="Map processes across canvas, matrix, hybrid lanes, and table views. Free, open-source, private — your data never leaves your browser. No signup.">
+
+<!-- Open Graph / Twitter card -->
+<meta property="og:title" content="FlowMap — Free Process Flow Mapping Tool">
+<meta property="og:description" content="Map processes across canvas, matrix, hybrid lanes, and table views. Free, open-source, private — your data never leaves your browser. No signup.">
+<meta property="og:type" content="website">
+<meta property="og:image" content="social-preview.png">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="FlowMap — Free Process Flow Mapping Tool">
+<meta name="twitter:description" content="Map processes across canvas, matrix, hybrid lanes, and table views. Free, open-source, private — your data never leaves your browser. No signup.">
+<meta name="twitter:image" content="social-preview.png">
+
+<!-- Favicon: rounded-rect block + decision diamond motif, accent blue -->
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='2' y='6' width='17' height='20' rx='6' fill='%230969da'/%3E%3Cpolygon points='25,8 31,16 25,24 19,16' fill='%2343a047'/%3E%3C/svg%3E">
+
+<!-- PWA -->
+<link rel="manifest" href="manifest.webmanifest">
+<meta name="theme-color" content="#ffffff">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="FlowMap">
+<link rel="apple-touch-icon" href="icon-192.png">
+<script>
+  // Service worker: cache-first offline support. No-ops from file:// and fails
+  // silently everywhere else — the app never depends on it.
+  if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
+    window.addEventListener('load', () => {
+      navigator.serviceWorker.register('sw.js').catch(() => {});
+    });
+  }
+</script>
+<style>
+  :root{
+    --border:#d0d7de; --text:#1f2328; --muted:#57606a; --accent:#0969da;
+    --up:#1e88e5; --down:#43a047; --warn:#ff9800;
+  }
+  *{box-sizing:border-box; margin:0; padding:0;}
+  html,body{height:100%; overflow:hidden;}
+  body{font:13px/1.4 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; color:var(--text); background:#fff;}
+  button,select,input{font:inherit; color:inherit;}
+
+  /* ---------- Toolbar ---------- */
+  #toolbar{
+    position:fixed; top:0; left:0; right:0; height:46px; z-index:30;
+    display:flex; align-items:center; gap:6px; padding:0 10px;
+    background:#f6f8fa; border-bottom:1px solid var(--border);
+    overflow-x:auto; scrollbar-width:thin;           /* narrow-screen: swipe the bar */
+  }
+  #toolbar .brand{font-weight:600; margin-right:8px; white-space:nowrap; flex-shrink:0;}
+  .tb-group{display:flex; align-items:center; gap:4px; padding:0 8px; border-left:1px solid var(--border); flex:none;}
+  .tb-group .tbtn, .tb-group select, .tb-group label{flex:none;}
+  .tb-group:first-of-type{border-left:none;}
+  .tbtn{
+    border:1px solid var(--border); background:#fff; border-radius:6px;
+    padding:4px 10px; cursor:pointer; white-space:nowrap;
+  }
+  .tbtn:hover{background:#eaeef2;}
+  .tbtn.active{background:var(--accent); border-color:var(--accent); color:#fff;}
+  .tbtn:disabled{opacity:.45; cursor:default;}
+  #matrixAxes{display:none; align-items:center; gap:6px;}
+  #matrixAxes select{max-width:150px; padding:3px 4px; border:1px solid var(--border); border-radius:6px; background:#fff;}
+  .tb-spacer{flex:1;}
+
+  /* add-block dropdown */
+  .dd{position:relative;}
+  .dd-menu{
+    display:none; position:absolute; top:calc(100% + 4px); left:0; z-index:40;
+    background:#fff; border:1px solid var(--border); border-radius:8px; box-shadow:0 8px 24px rgba(140,149,159,.25);
+    min-width:150px; padding:4px;
+  }
+  .dd.open .dd-menu{display:block;}
+  .dd-item{padding:6px 10px; border-radius:6px; cursor:pointer; display:flex; align-items:center; gap:8px;}
+  .dd-item:hover{background:#eaeef2;}
+  .dd-item svg{flex:none;}
+
+  /* ---------- SVG canvas ---------- */
+  #stage{position:fixed; inset:46px 0 0 0;}
+  #svg{width:100%; height:100%; display:block; cursor:default; user-select:none; -webkit-user-select:none;}
+  #svg.panning{cursor:grabbing;}
+  #svg.connecting{cursor:crosshair;}
+
+  .block{cursor:grab;}
+  .block.dim{opacity:.25;}
+  .edge.dim{opacity:.25;}
+  .edge{cursor:pointer;}
+  .lead{cursor:crosshair; fill:#fff; stroke:var(--muted); stroke-width:1.5;}
+  .lead:hover{fill:var(--accent); stroke:var(--accent);}
+
+  /* ---------- Table view ---------- */
+  #tableWrap{display:none; position:fixed; inset:46px 0 0 0; overflow:auto; background:#fff; padding:0 22px 30px; z-index:20;}
+  #grid{border-collapse:collapse; width:100%; font-size:13px;}
+  #grid th{
+    position:sticky; top:0; z-index:2; background:#f6f8fa; border-bottom:2px solid var(--border);
+    text-align:left; padding:8px 8px; font-size:11px; text-transform:uppercase; letter-spacing:.4px; color:var(--muted);
+    white-space:nowrap;
+  }
+  #grid td{padding:3px 8px; border-bottom:1px solid #eaeef2; vertical-align:middle;}
+  #grid td.num, #grid th.num{text-align:right;}
+  #grid tr:hover td{background:#f6f8fa;}
+  #grid tr.sel td{background:#ddf4ff;}
+  #grid tr.in-cycle td:first-child{border-left:3px solid #ff9800;}
+  #grid tr.in-cycle td:first-child::after{content:' ⟳'; color:#ff9800;}
+  #grid input[type=text], #grid input[type=number], #grid select{
+    width:100%; min-width:60px; padding:3px 5px; border:1px solid transparent; border-radius:5px; background:transparent;
+  }
+  #grid input:hover, #grid select:hover{border-color:var(--border); background:#fff;}
+  #grid input:focus, #grid select:focus{border-color:var(--accent); background:#fff; outline:none;}
+  #grid input[type=number]{text-align:right; max-width:80px;}
+  #grid .ttc{font-variant-numeric:tabular-nums; white-space:nowrap;}
+  #grid .rel{color:var(--muted); max-width:170px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+  #grid .ord{color:var(--muted); font-variant-numeric:tabular-nums;}
+
+  /* ---------- Property panel ---------- */
+  #panel{
+    position:fixed; top:46px; right:0; bottom:0; width:min(292px, 85vw); z-index:25;
+    background:#fff; border-left:1px solid var(--border);
+    transform:translateX(100%); transition:transform .18s ease;
+    display:flex; flex-direction:column;
+  }
+  #panel.open{transform:none;}
+  #panel.collapsed{transform:translateX(calc(100% + 2px));}
+  #panelTab{
+    display:none; position:fixed; right:0; top:50%; transform:translateY(-50%); z-index:24;
+    border:1px solid var(--border); border-right:none; background:#fff; color:var(--muted);
+    border-radius:8px 0 0 8px; padding:14px 7px; cursor:pointer; writing-mode:vertical-rl;
+    font-size:12px; letter-spacing:.5px; box-shadow:-2px 0 8px rgba(140,149,159,.15);
+  }
+  #panelTab:hover{color:var(--accent); border-color:var(--accent);}
+  #panel header{
+    display:flex; align-items:center; justify-content:space-between;
+    padding:10px 14px; border-bottom:1px solid var(--border); font-weight:600;
+  }
+  #panel .close{border:none; background:none; font-size:16px; cursor:pointer; color:var(--muted);}
+  #panel .body{flex:1; overflow-y:auto; padding:12px 14px;}
+  .fld{margin-bottom:10px;}
+  .fld label{display:block; font-size:11px; color:var(--muted); margin-bottom:3px; text-transform:uppercase; letter-spacing:.4px;}
+  .fld input[type=text], .fld select, .fld textarea{
+    width:100%; padding:5px 7px; border:1px solid var(--border); border-radius:6px; background:#fff;
+  }
+  .fld textarea{resize:vertical; min-height:52px;}
+  .rel-list{list-style:none;}
+  .rel-list li{padding:4px 7px; border:1px solid var(--border); border-radius:6px; margin-bottom:4px; background:#f6f8fa;
+    white-space:nowrap; overflow:hidden; text-overflow:ellipsis; cursor:pointer;}
+  .rel-list li:hover{border-color:var(--accent);}
+  .rel-empty{color:var(--muted); font-style:italic;}
+  #panel .actions{display:flex; gap:6px; padding:10px 14px; border-top:1px solid var(--border);}
+
+  /* ---------- Lead connections popup ---------- */
+  #leadPop{
+    display:none; position:fixed; z-index:50; width:min(250px, 80vw); max-height:260px; overflow-y:auto;
+    background:#fff; border:1px solid var(--border); border-radius:8px; box-shadow:0 8px 24px rgba(140,149,159,.3); padding:8px;
+  }
+  #leadPop h4{font-size:11px; text-transform:uppercase; color:var(--muted); margin:4px 2px 6px;}
+  #leadPop .lp-row{display:flex; align-items:center; gap:6px; margin-bottom:6px;}
+  #leadPop .lp-row .who{flex:1; min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}
+  #leadPop .lp-row input{width:70px; padding:2px 5px; border:1px solid var(--border); border-radius:5px;}
+  #leadPop .lp-row button{border:none; background:none; color:var(--muted); cursor:pointer; font-size:14px;}
+  #leadPop .lp-row button:hover{color:#f44336;}
+
+  /* ---------- Inline label editor ---------- */
+  #inlineEdit{
+    display:none; position:fixed; z-index:60; padding:4px 8px; text-align:center;
+    border:1.5px solid var(--accent); border-radius:4px; outline:none; background:#fff;
+  }
+
+  /* ---------- Toasts ---------- */
+  #toasts{position:fixed; bottom:22px; left:50%; transform:translateX(-50%); z-index:100; display:flex; flex-direction:column; gap:8px; align-items:center; pointer-events:none;}
+  .toast{background:#24292f; color:#fff; padding:8px 16px; border-radius:8px; box-shadow:0 6px 16px rgba(0,0,0,.25);
+    animation:tin .18s ease; max-width:70vw;}
+  .toast.out{opacity:0; transition:opacity .3s;}
+  @keyframes tin{from{opacity:0; transform:translateY(8px);} to{opacity:1; transform:none;}}
+
+  /* ---------- First-run hint & modal cards (§1/§2/§3) ---------- */
+  .scrim{
+    position:fixed; inset:0; z-index:80; background:rgba(31,35,40,.35);
+    display:flex; align-items:center; justify-content:center; padding:16px;
+  }
+  .card{
+    background:#fff; border:1px solid var(--border); border-radius:12px;
+    box-shadow:0 16px 48px rgba(31,35,40,.25); max-width:420px; width:100%;
+    padding:20px 22px; animation:tin .18s ease; max-height:85vh; overflow-y:auto;
+  }
+  .card h2{font-size:17px; margin-bottom:10px; display:flex; justify-content:space-between; align-items:center;}
+  .card h2 .x{border:none; background:none; font-size:16px; color:var(--muted); cursor:pointer;}
+  .card p{margin-bottom:10px; color:var(--text);}
+  .card .card-actions{display:flex; align-items:center; gap:14px; margin-top:14px;}
+  .btn-primary{
+    background:var(--accent); color:#fff; border:1px solid var(--accent); border-radius:6px;
+    padding:6px 14px; cursor:pointer;
+  }
+  .btn-primary:hover{background:#0860c4;}
+  .linklike{border:none; background:none; color:var(--muted); cursor:pointer; text-decoration:underline; font-size:12px;}
+  .card.wide{max-width:640px;}
+  .sc-cols{display:grid; grid-template-columns:1fr 1fr; gap:4px 24px;}
+  @media (max-width:560px){ .sc-cols{grid-template-columns:1fr;} }
+  .sc-group{margin-bottom:12px;}
+  .sc-group h3{font-size:11px; text-transform:uppercase; letter-spacing:.4px; color:var(--muted); margin-bottom:5px;}
+  .sc-group li{list-style:none; padding:2.5px 0; color:var(--text);}
+  .sc-group kbd{
+    background:#f6f8fa; border:1px solid var(--border); border-bottom-width:2px; border-radius:4px;
+    padding:0 5px; font:11px ui-monospace,monospace;
+  }
+  /* gentle pulse on mode buttons while the hint is open */
+  @keyframes hintPulse{
+    0%,100%{box-shadow:0 0 0 0 rgba(9,105,218,0);}
+    50%{box-shadow:0 0 0 5px rgba(9,105,218,.28);}
+  }
+  .hint-pulse{animation:hintPulse 1.1s ease-in-out 2;}
+</style>
+</head>
+<body>
+
+<div id="toolbar">
+  <span class="brand">FlowMap</span>
+  <div class="tb-group">
+    <button class="tbtn active" id="modeCanvas">Canvas</button>
+    <button class="tbtn" id="modeMatrix">Matrix</button>
+    <button class="tbtn" id="modeHybrid">Hybrid</button>
+    <button class="tbtn" id="modeTable">Table</button>
+  </div>
+  <div class="tb-group" id="matrixAxes">
+    <label>X <select id="axisX"></select></label>
+    <label>Y <select id="axisY"></select></label>
+  </div>
+  <div class="tb-group">
+    <label style="color:var(--muted)">Arrows
+      <select id="edgeStyle" style="padding:3px 4px; border:1px solid var(--border); border-radius:6px; background:#fff">
+        <option value="square">Square</option>
+        <option value="curved">Curved</option>
+      </select>
+    </label>
+  </div>
+  <div class="tb-group">
+    <div class="dd" id="addDD">
+      <button class="tbtn" id="addBtn">＋ Add block ▾</button>
+      <div class="dd-menu" id="addMenu"></div>
+    </div>
+    <button class="tbtn" id="dupBtn" title="Ctrl+D">Duplicate</button>
+    <button class="tbtn" id="delBtn" title="Delete">Delete</button>
+  </div>
+  <div class="tb-group">
+    <button class="tbtn" id="undoBtn" title="Ctrl+Z">↶ Undo</button>
+    <button class="tbtn" id="redoBtn" title="Ctrl+Y">↷ Redo</button>
+  </div>
+  <div class="tb-group">
+    <button class="tbtn" id="zoomOut">−</button>
+    <button class="tbtn" id="zoomPct" title="Click to reset zoom">100%</button>
+    <button class="tbtn" id="zoomIn">＋</button>
+    <button class="tbtn" id="fitBtn">Fit to view</button>
+  </div>
+  <div class="tb-spacer"></div>
+  <div class="tb-group" style="border-left:1px solid var(--border)">
+    <button class="tbtn" id="expJson">Export JSON</button>
+    <button class="tbtn" id="impJson">Import JSON</button>
+    <button class="tbtn" id="expPng">Export PNG</button>
+  </div>
+  <div class="tb-group">
+    <div class="dd" id="helpDD">
+      <button class="tbtn" id="helpBtn" title="Help & about">ⓘ</button>
+      <div class="dd-menu" id="helpMenu" style="left:auto; right:0; min-width:190px;"></div>
+    </div>
+  </div>
+</div>
+<noscript><div style="position:fixed;inset:0;display:flex;align-items:center;justify-content:center;font:14px system-ui;background:#fff;z-index:999">FlowMap needs JavaScript.</div></noscript>
+
+<div id="stage"><svg id="svg" tabindex="0"></svg></div>
+<div id="tableWrap"></div>
+
+<div id="panel">
+  <header>
+    <span id="panelTitle">Block properties</span>
+    <span>
+      <button class="close" id="panelCollapse" title="Collapse panel">⟩</button>
+      <button class="close" id="panelClose" title="Close (clear selection)">✕</button>
+    </span>
+  </header>
+  <div class="body" id="panelBody"></div>
+  <div class="actions">
+    <button class="tbtn" id="panelDup">Duplicate</button>
+    <button class="tbtn" id="panelDel" style="color:#f44336">Delete</button>
+  </div>
+</div>
+<button id="panelTab" title="Show properties">◖ Properties</button>
+
+<div id="leadPop"></div>
+<input id="inlineEdit" type="text">
+<div id="toasts"></div>
+<input type="file" id="fileInput" accept=".json,application/json" style="display:none">
+
+<script>
+'use strict';
+/* ============================================================
+   FlowMap — single-file process flow mapper (vanilla JS + SVG)
+   ============================================================ */
+
+/* ---------------- Constants ---------------- */
+const SVGNS = 'http://www.w3.org/2000/svg';
+const LS_KEY = 'flowmap.v1';
+const APP_VERSION = '1.0.0';
+const REPO_URL = 'https://github.com/<OWNER>/<REPO>';   // TODO: replace after repo exists
+const FEEDBACK_URL = REPO_URL + '/issues/new/choose';   // single edit point for feedback links
+const HINT_KEY = 'flowmap.v1.hintSeen';
+const SNAP = 10;                       // 10px snap grid
+const CELL_W = 260, CELL_H = 180;      // matrix default cell size
+const CELL_PAD = 14, HEADER_COL = 150, HEADER_ROW = 40, CELL_GAP = 12;
+
+const CRIT_COLORS = { low:'#4caf50', medium:'#ff9800', high:'#f44336', critical:'#8e24aa', '':'#d0d7de' };
+const CRITS = ['', 'low', 'medium', 'high', 'critical'];
+
+const BLOCK_TYPES = {
+  process:    { name:'Process',   w:170, h:64 },
+  decision:   { name:'Decision',  w:150, h:88 },
+  terminator: { name:'Start/End', w:150, h:56 },
+  data:       { name:'Data',      w:170, h:64 },
+  document:   { name:'Document',  w:170, h:68 },
+};
+
+// Axis-eligible block properties (precedents/dependents are derived — excluded)
+const AXIS_PROPS = [
+  ['ownerTeam','Owner team'], ['softwareStack','Software stack'], ['criticality','Criticality'],
+  ['ownerPerson','Owner person'], ['location','Location'], ['scope','Scope'],
+  ['manHours','Man-hours'], ['resources','Resources'],
+  ['type','Block type'], ['label','Label'],
+];
+
+/* ---------------- State ---------------- */
+let doc = null;               // persisted document
+let sel = { blocks:new Set(), edges:new Set() };
+let hoverId = null;           // block id currently hover-traced
+let trace = null;             // {up:{blocks,edges}, down:{blocks,edges}}
+let cycleSet = { blocks:new Set(), edges:new Set() };
+let matrixLayout = null;      // computed layout in matrix mode
+let hybridLayout = null;      // computed layout in hybrid mode
+let gesture = null;           // active pointer gesture
+let spaceDown = false;
+
+const $  = s => document.querySelector(s);
+const svg = $('#svg');
+
+function uid(){ return 'id' + Math.random().toString(36).slice(2,10) + Date.now().toString(36).slice(-4); }
+function clamp(v,a,b){ return Math.max(a, Math.min(b,v)); }
+function esc(s){ return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+/* ---------------- Document model ---------------- */
+function newDoc(){
+  return {
+    schemaVersion:1,
+    mode:'canvas',
+    edgeStyle:'square',          // 'square' (orthogonal) | 'curved' (cubic bezier)
+    blocks:[], edges:[],
+    matrix:{ xProp:'ownerTeam', yProp:'softwareStack' },
+    views:{ canvas:{tx:60, ty:60, k:1}, matrix:{tx:0, ty:0, k:1}, hybrid:{tx:0, ty:0, k:1}, table:{tx:0, ty:0, k:1} },
+    ui:{ panelCollapsed:false },
+  };
+}
+/* Fill fields introduced after older saves were written */
+function normalizeBlocks(){
+  doc.blocks.forEach(b => {
+    if(!('manHours' in b)) b.manHours = null;
+    if(!('resources' in b)) b.resources = null;
+  });
+}
+function blockById(id){ return doc.blocks.find(b => b.id === id); }
+function edgeById(id){ return doc.edges.find(e => e.id === id); }
+function makeBlock(type, x, y, label){
+  const t = BLOCK_TYPES[type];
+  return { id:uid(), type, label: label ?? t.name, x, y, w:t.w, h:t.h,
+    ownerTeam:'', ownerPerson:'', softwareStack:'', criticality:'', scope:'', location:'',
+    manHours:null, resources:null };
+}
+/* Approximate flow order: canvas x center, then y, then label (shared by hybrid + table) */
+function flowOrder(){
+  return [...doc.blocks].sort((a,b) =>
+    (a.x + a.w/2) - (b.x + b.w/2) || (a.y - b.y) || a.label.localeCompare(b.label));
+}
+/* Calculated property: time to complete = manHours / resources (hours) */
+function timeToComplete(b){
+  const h = Number(b.manHours), r = Number(b.resources);
+  if(!h || !r || r <= 0) return null;
+  return h / r;
+}
+function fmtHours(h){
+  if(h === null || h === undefined) return '—';
+  const v = Math.round(h * 10) / 10;
+  return v + ' h';
+}
+function outEdges(id){ return doc.edges.filter(e => e.from === id); }
+function inEdges(id){ return doc.edges.filter(e => e.to === id); }
+function precedentsOf(id){ return inEdges(id).map(e => blockById(e.from)).filter(Boolean); }
+function dependentsOf(id){ return outEdges(id).map(e => blockById(e.to)).filter(Boolean); }
+
+/* ---------------- Persistence ---------------- */
+function save(){
+  try{ localStorage.setItem(LS_KEY, JSON.stringify(doc)); }catch(err){ /* storage may be unavailable */ }
+}
+function load(){
+  try{
+    const raw = localStorage.getItem(LS_KEY);
+    if(!raw) return null;
+    const d = JSON.parse(raw);
+    if(!d || d.schemaVersion !== 1 || !Array.isArray(d.blocks) || !Array.isArray(d.edges)) return null;
+    return Object.assign(newDoc(), d);
+  }catch(err){ return null; }
+}
+
+/* ---------------- Undo / redo (snapshot history, capped at 100) ---------------- */
+let undoStack = [], redoStack = [];
+function snapDoc(){ return JSON.stringify({ blocks:doc.blocks, edges:doc.edges, matrix:doc.matrix }); }
+function commit(){
+  undoStack.push(snapDoc());
+  if(undoStack.length > 100) undoStack.shift();
+  redoStack.length = 0;
+  updateUndoBtns();
+}
+function applySnap(s){
+  const d = JSON.parse(s);
+  doc.blocks = d.blocks; doc.edges = d.edges; doc.matrix = d.matrix;
+  sel.blocks.forEach(id => { if(!blockById(id)) sel.blocks.delete(id); });
+  sel.edges.forEach(id => { if(!edgeById(id)) sel.edges.delete(id); });
+}
+function undo(){
+  if(!undoStack.length) return;
+  redoStack.push(snapDoc());
+  applySnap(undoStack.pop());
+  afterMutation(); updateUndoBtns();
+}
+function redo(){
+  if(!redoStack.length) return;
+  undoStack.push(snapDoc());
+  applySnap(redoStack.pop());
+  afterMutation(); updateUndoBtns();
+}
+function updateUndoBtns(){
+  $('#undoBtn').disabled = !undoStack.length;
+  $('#redoBtn').disabled = !redoStack.length;
+}
+
+/* Called after every mutation: recompute derived visuals, render, autosave */
+function afterMutation(){
+  computeCycles();
+  render();
+  save();
+}
+
+/* ---------------- Cycle detection (Tarjan SCC) ---------------- */
+function computeCycles(){
+  cycleSet = { blocks:new Set(), edges:new Set() };
+  const adj = new Map(doc.blocks.map(b => [b.id, outEdges(b.id)]));
+  let idx = 0; const index = new Map(), low = new Map(), onStack = new Set(), stack = [];
+  function strongconnect(v){
+    index.set(v, idx); low.set(v, idx); idx++;
+    stack.push(v); onStack.add(v);
+    for(const e of (adj.get(v) || [])){
+      const w = e.to;
+      if(!adj.has(w)) continue;
+      if(!index.has(w)){ strongconnect(w); low.set(v, Math.min(low.get(v), low.get(w))); }
+      else if(onStack.has(w)){ low.set(v, Math.min(low.get(v), index.get(w))); }
+    }
+    if(low.get(v) === index.get(v)){
+      const scc = [];
+      let w;
+      do{ w = stack.pop(); onStack.delete(w); scc.push(w); }while(w !== v);
+      if(scc.length > 1){
+        const inScc = new Set(scc);
+        scc.forEach(id => cycleSet.blocks.add(id));
+        doc.edges.forEach(e => { if(inScc.has(e.from) && inScc.has(e.to)) cycleSet.edges.add(e.id); });
+      }
+    }
+  }
+  doc.blocks.forEach(b => { if(!index.has(b.id)) strongconnect(b.id); });
+}
+
+/* ---------------- Hover trace (upstream/downstream) ---------------- */
+function computeTrace(id){
+  const up = { blocks:new Set(), edges:new Set() };
+  const down = { blocks:new Set(), edges:new Set() };
+  (function walkUp(cur){
+    for(const e of inEdges(cur)){
+      if(up.edges.has(e.id)) continue;
+      up.edges.add(e.id); up.blocks.add(e.from); walkUp(e.from);
+    }
+  })(id);
+  (function walkDown(cur){
+    for(const e of outEdges(cur)){
+      if(down.edges.has(e.id)) continue;
+      down.edges.add(e.id); down.blocks.add(e.to); walkDown(e.to);
+    }
+  })(id);
+  return { up, down };
+}
+
+/* ---------------- Toasts ---------------- */
+function toast(msg){
+  const t = document.createElement('div');
+  t.className = 'toast'; t.textContent = msg;
+  $('#toasts').appendChild(t);
+  setTimeout(() => { t.classList.add('out'); setTimeout(() => t.remove(), 350); }, 2500);
+}
+
+/* ---------------- Demo dataset (first run only) ---------------- */
+function demoDoc(){
+  const d = newDoc();
+  const B = (type,x,y,label,props) => Object.assign(makeBlock(type,x,y,label), props||{});
+  d.blocks = [
+    B('terminator',  60, 260, 'Order received',      {ownerTeam:'Sales',      softwareStack:'Salesforce', criticality:'medium'}),
+    B('process',    300, 100, 'Validate order',      {ownerTeam:'Sales',      softwareStack:'Salesforce', criticality:'low',     manHours:2,   resources:1}),
+    B('process',    300, 420, 'Check inventory',     {ownerTeam:'Operations', softwareStack:'SAP',        criticality:'medium',  manHours:4,   resources:2}),
+    B('process',    560, 260, 'Charge customer',     {ownerTeam:'Finance',    softwareStack:'Stripe',     criticality:'critical',manHours:1,   resources:1}),
+    B('decision',   810, 248, 'Payment ok?',         {ownerTeam:'Finance',    softwareStack:'Stripe',     criticality:'high'}),
+    B('process',    810, 480, 'Contact customer',    {ownerTeam:'Sales',      softwareStack:'Salesforce', criticality:'medium',  manHours:0.5, resources:1}),
+    B('process',   1060, 100, 'Fulfill order',       {ownerTeam:'Operations', softwareStack:'SAP',        criticality:'high',    manHours:8,   resources:2}),
+    B('document',  1060, 248, 'Generate invoice',    {ownerTeam:'Finance',    softwareStack:'',           criticality:'medium',  manHours:1,   resources:1}),
+    B('process',   1060, 420, 'Ship order',          {ownerTeam:'Operations', softwareStack:'SAP',        criticality:'high',    manHours:6,   resources:3}),
+    B('data',      1310, 170, 'Update CRM',          {ownerTeam:'Sales',      softwareStack:'Salesforce', criticality:'low',     manHours:0.5, resources:1}),
+    B('process',   1310, 330, 'Send confirmation',   {ownerTeam:'Sales',      softwareStack:'Salesforce', criticality:'low',     manHours:0.5, resources:1}),
+    B('terminator',1550, 250, 'Order complete',      {ownerTeam:'Sales',      softwareStack:'Salesforce', criticality:'low'}),
+  ];
+  const E = (f,t,label) => ({ id:uid(), from:d.blocks[f].id, to:d.blocks[t].id, label:label||'' });
+  d.edges = [
+    E(0,1), E(0,2), E(1,3), E(2,3), E(3,4),
+    E(4,6,'yes'), E(4,5,'no'), E(5,3,'retry'),   // ← deliberate loop: Charge → Payment ok? → Contact → Charge
+    E(6,7), E(7,8), E(8,9), E(9,10), E(10,11),
+  ];
+  d.views.canvas = { tx:40, ty:30, k:0.75 };
+  return d;
+}
+
+/* ============================================================
+   Rendering
+   ============================================================ */
+let gView, gGrid, gEdges, gBlocks, gOverlay;
+
+function el(name, attrs, parent){
+  const n = document.createElementNS(SVGNS, name);
+  if(attrs) for(const k in attrs) n.setAttribute(k, attrs[k]);
+  if(parent) parent.appendChild(n);
+  return n;
+}
+function view(){ return doc.views[doc.mode]; }
+function viewTransform(){
+  const v = view();
+  return `translate(${v.tx},${v.ty}) scale(${v.k})`;
+}
+function screenToWorld(px, py){
+  const r = svg.getBoundingClientRect();
+  const v = view();
+  return { x:(px - r.left - v.tx)/v.k, y:(py - r.top - v.ty)/v.k };
+}
+function worldToScreen(wx, wy){
+  const r = svg.getBoundingClientRect();
+  const v = view();
+  return { x: r.left + v.tx + wx*v.k, y: r.top + v.ty + wy*v.k };
+}
+
+/* Block position: canvas = stored; matrix/hybrid = computed (unless being dragged) */
+function blockPos(b){
+  if(doc.mode !== 'canvas'){
+    if(gesture && gesture.type === 'blockdrag' && gesture.matrixIds.has(b.id))
+      return { x: gesture.mx - gesture.offMap.get(b.id).dx, y: gesture.my - gesture.offMap.get(b.id).dy };
+    const L = activeLayout();
+    const p = L && L.pos.get(b.id);
+    if(p) return p;
+  }
+  return { x:b.x, y:b.y };
+}
+function activeLayout(){ return doc.mode === 'matrix' ? matrixLayout : doc.mode === 'hybrid' ? hybridLayout : null; }
+function leadIn(b){ const p = blockPos(b); return { x:p.x, y:p.y + b.h/2 }; }
+function leadOut(b){ const p = blockPos(b); return { x:p.x + b.w, y:p.y + b.h/2 }; }
+
+function setupSvg(){
+  svg.innerHTML = '';
+  const defs = el('defs', null, svg);
+  // dot-grid pattern for canvas mode
+  const pat = el('pattern', { id:'dots', width:SNAP*2, height:SNAP*2, patternUnits:'userSpaceOnUse' }, defs);
+  el('circle', { cx:1, cy:1, r:1, fill:'#d0d7de' }, pat);
+  // arrowhead markers
+  const markers = { norm:'#57606a', sel:'#0969da', up:'#1e88e5', down:'#43a047', warn:'#ff9800' };
+  for(const k in markers){
+    const m = el('marker', { id:'arr-'+k, viewBox:'0 0 10 10', refX:9, refY:5,
+      markerWidth:7, markerHeight:7, orient:'auto-start-reverse' }, defs);
+    el('path', { d:'M0,0 L10,5 L0,10 z', fill:markers[k] }, m);
+  }
+  // subtle selection shadow
+  const f = el('filter', { id:'selShadow', x:'-30%', y:'-30%', width:'160%', height:'160%' }, defs);
+  el('feDropShadow', { dx:0, dy:2, stdDeviation:3, 'flood-color':'#0969da', 'flood-opacity':0.35 }, f);
+
+  gView    = el('g', null, svg);
+  gGrid    = el('g', null, gView);
+  gEdges   = el('g', null, gView);
+  gBlocks  = el('g', null, gView);
+  gOverlay = el('g', null, gView);
+}
+
+/* ---------- shape path per block type ---------- */
+function shapeEl(b, parent){
+  const { w, h } = b;
+  const common = { fill:'#ffffff', 'stroke-width': cycleSet.blocks.has(b.id) ? 2 : 1 };
+  let n;
+  switch(b.type){
+    case 'decision':
+      n = el('polygon', { points:`${w/2},0 ${w},${h/2} ${w/2},${h} 0,${h/2}`, ...common }, parent); break;
+    case 'terminator':
+      n = el('rect', { x:0, y:0, width:w, height:h, rx:h/2, ry:h/2, ...common }, parent); break;
+    case 'data':{
+      const s = 18;
+      n = el('polygon', { points:`${s},0 ${w},0 ${w-s},${h} 0,${h}`, ...common }, parent); break;
+    }
+    case 'document':{
+      const a = h - 12;
+      n = el('path', { d:`M0,0 H${w} V${a} Q${w*0.75},${h+4} ${w/2},${a} T0,${a} Z`, ...common }, parent); break;
+    }
+    default:
+      n = el('rect', { x:0, y:0, width:w, height:h, rx:6, ry:6, ...common }, parent);
+  }
+  return n;
+}
+
+function truncate(text, px){
+  const maxChars = Math.max(2, Math.floor(px / 7));
+  text = String(text ?? '');
+  return text.length > maxChars ? text.slice(0, maxChars - 1) + '…' : text;
+}
+
+/* ---------- main render ---------- */
+function render(){
+  if(doc.mode === 'table'){
+    svg.style.display = 'none';
+    $('#tableWrap').style.display = 'block';
+    renderTable();
+    return;
+  }
+  svg.style.display = '';
+  $('#tableWrap').style.display = 'none';
+  setupSvg();
+  gView.setAttribute('transform', viewTransform());
+
+  if(doc.mode === 'matrix') computeMatrixLayout();
+  if(doc.mode === 'hybrid') computeHybridLayout();
+  renderGrid();
+
+  for(const e of doc.edges) renderEdge(e);
+  for(const b of doc.blocks) renderBlock(b);
+
+  renderOverlay();
+  $('#zoomPct').textContent = Math.round(view().k * 100) + '%';
+}
+
+/* ---------- grid / matrix / hybrid backdrop ---------- */
+function renderGrid(){
+  if(doc.mode === 'canvas'){
+    // dot grid covering a generous region around content
+    const bb = contentBBox(800);
+    el('rect', { x:bb.x - 2000, y:bb.y - 2000, width:bb.w + 4000, height:bb.h + 4000, fill:'url(#dots)' }, gGrid);
+    return;
+  }
+  // matrix & hybrid: headers + cell borders (hybrid column widths vary per segment)
+  const L = activeLayout();
+  const { cols, rows, colX, rowY } = L;
+  const totalW = L.totalW, totalH = L.totalH;
+  const fs = 13;
+  // corner label
+  const corner = el('text', { x:HEADER_COL - 10, y:HEADER_ROW/2 + 4, 'text-anchor':'end',
+    'font-size':11, fill:'#57606a' }, gGrid);
+  corner.textContent = `${axisName(L.yProp)} ↓  /  ${axisName(L.xProp)} →`;
+  // column headers
+  cols.forEach((c, i) => {
+    const t = el('text', { x:colX[i] + L.colW[i]/2, y:HEADER_ROW/2 + 4, 'text-anchor':'middle',
+      'font-size':fs, 'font-weight':600, fill:'#1f2328' }, gGrid);
+    t.textContent = truncate(c.label, L.colW[i] - 20);
+  });
+  // row headers
+  rows.forEach((r, i) => {
+    const t = el('text', { x:HEADER_COL - 12, y:rowY[i] + L.rowH[i]/2 + 4, 'text-anchor':'end',
+      'font-size':fs, 'font-weight':600, fill:'#1f2328' }, gGrid);
+    t.textContent = truncate(r.label, HEADER_COL - 26);
+  });
+  // grid lines
+  const line = (x1,y1,x2,y2) => el('line', { x1, y1, x2, y2, stroke:'#d0d7de', 'stroke-width':1 }, gGrid);
+  line(HEADER_COL, 0, HEADER_COL, totalH);
+  line(0, HEADER_ROW, totalW, HEADER_ROW);
+  colX.forEach(x => line(x, HEADER_ROW, x, totalH));
+  rowY.forEach(y => line(HEADER_COL, y, totalW, y));
+  line(totalW, HEADER_ROW, totalW, totalH);
+  line(HEADER_COL, totalH, totalW, totalH);
+  // ghost cell highlight while drag-to-reassign
+  if(gesture && gesture.type === 'blockdrag' && gesture.hoverCell){
+    const { ci, ri } = gesture.hoverCell;
+    el('rect', { x:colX[ci], y:rowY[ri], width:L.colW[ci], height:L.rowH[ri],
+      fill:'rgba(9,105,218,.10)', stroke:'#0969da', 'stroke-width':1.5, 'stroke-dasharray':'6 4', rx:4 }, gGrid);
+  }
+}
+function axisName(p){ const f = AXIS_PROPS.find(a => a[0] === p); return f ? f[1] : p; }
+
+function contentBBox(pad){
+  pad = pad || 60;
+  if(!doc.blocks.length) return { x:0, y:0, w:800, h:600 };
+  let x1=1e9, y1=1e9, x2=-1e9, y2=-1e9;
+  for(const b of doc.blocks){
+    const p = blockPos(b);
+    x1 = Math.min(x1, p.x); y1 = Math.min(y1, p.y);
+    x2 = Math.max(x2, p.x + b.w); y2 = Math.max(y2, p.y + b.h);
+  }
+  const L = activeLayout();
+  if(L){
+    x2 = Math.max(x2, L.totalW); y2 = Math.max(y2, L.totalH);
+    x1 = Math.min(x1, 0); y1 = Math.min(y1, 0);
+  }
+  return { x:x1 - pad, y:y1 - pad, w:(x2 - x1) + pad*2, h:(y2 - y1) + pad*2 };
+}
+
+/* ---------- matrix layout ---------- */
+function blockAxisVal(b, prop){
+  if(prop === 'type') return BLOCK_TYPES[b.type].name;
+  return (b[prop] || '').toString().trim();
+}
+function computeMatrixLayout(){
+  const { xProp, yProp } = doc.matrix;
+  const xv = new Map(), yv = new Map();  // value → blocks
+  for(const b of doc.blocks){
+    const x = blockAxisVal(b, xProp), y = blockAxisVal(b, yProp);
+    if(!xv.has(x)) xv.set(x, []); xv.get(x).push(b);
+    if(!yv.has(y)) yv.set(y, []); yv.get(y).push(b);
+  }
+  const sortKeys = m => [...m.keys()].filter(k => k !== '').sort((a,b) => a.localeCompare(b))
+    .concat(m.has('') ? [''] : []);
+  const cols = sortKeys(xv).map(v => ({ val:v, label: v === '' ? 'Unassigned' : v }));
+  const rows = sortKeys(yv).map(v => ({ val:v, label: v === '' ? 'Unassigned' : v }));
+
+  const colX = []; let cx = HEADER_COL;
+  cols.forEach(() => { colX.push(cx); cx += CELL_W; });
+  const rowH = [], rowY = []; let ry = HEADER_ROW;
+  const pos = new Map();
+  rows.forEach(r => {
+    // row height = max stacked content across its cells
+    let need = CELL_H;
+    cols.forEach(c => {
+      const cellBlocks = doc.blocks.filter(b => blockAxisVal(b, xProp) === c.val && blockAxisVal(b, yProp) === r.val);
+      const h = cellBlocks.reduce((s,b) => s + b.h + CELL_GAP, CELL_PAD*2);
+      need = Math.max(need, h);
+    });
+    rowH.push(need); rowY.push(ry); ry += need;
+  });
+  cols.forEach((c, ci) => {
+    rows.forEach((r, ri) => {
+      const cellBlocks = doc.blocks
+        .filter(b => blockAxisVal(b, xProp) === c.val && blockAxisVal(b, yProp) === r.val)
+        .sort((a,b) => a.label.localeCompare(b.label));
+      let y = rowY[ri] + CELL_PAD;
+      for(const b of cellBlocks){
+        pos.set(b.id, { x: colX[ci] + (CELL_W - b.w)/2, y });
+        y += b.h + CELL_GAP;
+      }
+    });
+  });
+  matrixLayout = { xProp, yProp, cols, rows, colX, colW: cols.map(() => CELL_W), rowY, rowH, pos,
+    totalW: cx, totalH: ry };
+}
+
+/* ---------- hybrid layout ----------
+   Y = strict lanes (like matrix rows).
+   X = column bands labelled by the X property, following the canvas flow order
+   (blocks sorted by canvas x). Each activity gets its own band, so labels may
+   repeat along the flow (e.g. Sales | Operations | Sales | Procurement) and
+   every band holds only blocks whose X value matches — keeping connections
+   forward-flowing and the diagram unconvoluted. */
+function computeHybridLayout(){
+  const { xProp, yProp } = doc.matrix;
+  // Y lanes: distinct values, alphabetical, Unassigned last
+  const yVals = new Map();
+  for(const b of doc.blocks){
+    const y = blockAxisVal(b, yProp);
+    if(!yVals.has(y)) yVals.set(y, []);
+    yVals.get(y).push(b);
+  }
+  const laneKeys = [...yVals.keys()].filter(k => k !== '').sort((a,b) => a.localeCompare(b))
+    .concat(yVals.has('') ? [''] : []);
+  const rows = laneKeys.map(v => ({ val:v, label: v === '' ? 'Unassigned' : v }));
+
+  // X segments from canvas flow order (x center, then y, then label).
+  // Every activity gets its OWN band — the same label repeats along the flow
+  // rather than merging, so connections always run forward left→right.
+  const ordered = [...doc.blocks].sort((a,b) =>
+    (a.x + a.w/2) - (b.x + b.w/2) || (a.y - b.y) || a.label.localeCompare(b.label));
+  const cols = ordered.map(b => {
+    const v = blockAxisVal(b, xProp);
+    return { val:v, label: v === '' ? 'Unassigned' : v, blocks:[b] };
+  });
+
+  // segment widths: max block width + padding, min 200
+  const colW = cols.map(c => Math.max(200, ...c.blocks.map(b => b.w + CELL_PAD*2)));
+  const colX = []; let cx = HEADER_COL;
+  colW.forEach(w => { colX.push(cx); cx += w; });
+
+  // lane heights: max stacked content across segments, min CELL_H
+  const rowH = [], rowY = []; let ry = HEADER_ROW;
+  rows.forEach(r => {
+    let need = CELL_H;
+    cols.forEach(c => {
+      const cellBlocks = c.blocks.filter(b => blockAxisVal(b, yProp) === r.val);
+      const h = cellBlocks.reduce((s,b) => s + b.h + CELL_GAP, CELL_PAD*2);
+      need = Math.max(need, h);
+    });
+    rowH.push(need); rowY.push(ry); ry += need;
+  });
+
+  // stack blocks within (segment, lane), ordered by canvas y to respect the flow
+  const pos = new Map();
+  cols.forEach((c, ci) => {
+    rows.forEach((r, ri) => {
+      const cellBlocks = c.blocks
+        .filter(b => blockAxisVal(b, yProp) === r.val)
+        .sort((a,b) => (a.y - b.y) || a.label.localeCompare(b.label));
+      let y = rowY[ri] + CELL_PAD;
+      for(const b of cellBlocks){
+        pos.set(b.id, { x: colX[ci] + (colW[ci] - b.w)/2, y });
+        y += b.h + CELL_GAP;
+      }
+    });
+  });
+  hybridLayout = { xProp, yProp, cols, rows, colX, colW, rowY, rowH, pos,
+    totalW: cx, totalH: ry };
+}
+function cellAt(wx, wy){
+  const L = activeLayout();
+  if(!L) return null;
+  const ci = L.colX.findIndex((x, i) => wx >= x && wx < x + L.colW[i]);
+  const ri = L.rowY.findIndex((y, i) => wy >= y && wy < y + L.rowH[i]);
+  if(ci < 0 || ri < 0) return null;
+  return { ci, ri };
+}
+
+/* ---------- edges ---------- */
+/* Orthogonal path with rounded corners through a list of points */
+function orthPath(pts, r){
+  r = r ?? 8;
+  let d = `M${pts[0].x},${pts[0].y}`;
+  for(let i = 1; i < pts.length; i++){
+    const p = pts[i];
+    if(i === pts.length - 1){ d += ` L${p.x},${p.y}`; break; }
+    const prev = pts[i-1], next = pts[i+1];
+    const d1 = Math.hypot(p.x - prev.x, p.y - prev.y);
+    const d2 = Math.hypot(next.x - p.x, next.y - p.y);
+    const rr = Math.min(r, d1/2, d2/2);
+    const inX  = p.x + Math.sign(prev.x - p.x) * rr,  inY  = p.y + Math.sign(prev.y - p.y) * rr;
+    const outX = p.x + Math.sign(next.x - p.x) * rr,  outY = p.y + Math.sign(next.y - p.y) * rr;
+    d += ` L${inX},${inY} Q${p.x},${p.y} ${outX},${outY}`;
+  }
+  return d;
+}
+/* Edge geometry for both styles. Returns { d, mid } — mid is used for the
+   label badge and the delete × button. */
+function edgeGeomFromPoints(p1, p2){
+  if(doc.edgeStyle === 'curved'){
+    const dx = Math.max(40, Math.abs(p2.x - p1.x) / 2);
+    return {
+      d: `M${p1.x},${p1.y} C${p1.x + dx},${p1.y} ${p2.x - dx},${p2.y} ${p2.x},${p2.y}`,
+      mid: { x:(p1.x + 3*(p1.x+dx) + 3*(p2.x-dx) + p2.x) / 8, y:(p1.y + 3*p1.y + 3*p2.y + p2.y) / 8 },
+    };
+  }
+  // square (orthogonal, default)
+  const stub = 20;
+  if(p2.x - p1.x >= 24){
+    // target ahead: out → mid vertical → in
+    const mx = (p1.x + p2.x) / 2;
+    return {
+      d: orthPath([p1, {x:mx, y:p1.y}, {x:mx, y:p2.y}, p2]),
+      mid: { x:mx, y:(p1.y + p2.y)/2 },
+    };
+  }
+  // target behind or too close: route around (above or below, away from target)
+  const bypassY = p2.y >= p1.y
+    ? Math.max(p1.y, p2.y) + 44
+    : Math.min(p1.y, p2.y) - 44;
+  return {
+    d: orthPath([p1, {x:p1.x + stub, y:p1.y}, {x:p1.x + stub, y:bypassY},
+                 {x:p2.x - stub, y:bypassY}, {x:p2.x - stub, y:p2.y}, p2]),
+    mid: { x:(p1.x + stub + p2.x - stub)/2, y:bypassY },
+  };
+}
+function edgeGeom(e){
+  const a = blockById(e.from), b = blockById(e.to);
+  if(!a || !b) return { d:'', mid:{x:0, y:0} };
+  return edgeGeomFromPoints(leadOut(a), leadIn(b));
+}
+function edgePath(e){ return edgeGeom(e).d; }
+function edgeMidpoint(e){ return edgeGeom(e).mid; }
+function renderEdge(e){
+  const g = el('g', { class:'edge', 'data-id':e.id }, gEdges);
+  let stroke = '#57606a', marker = 'norm', width = 1.5, dash = null;
+  const isCycle = cycleSet.edges.has(e.id);
+  const isSel = sel.edges.has(e.id);
+  let dim = false;
+  if(trace && hoverId){
+    if(trace.up.edges.has(e.id)){ stroke = '#1e88e5'; marker = 'up'; width = 2.2; }
+    else if(trace.down.edges.has(e.id)){ stroke = '#43a047'; marker = 'down'; width = 2.2; }
+    else dim = true;
+  } else if(isCycle){ stroke = '#ff9800'; marker = 'warn'; dash = '6 4'; }
+  if(isSel){ stroke = '#0969da'; marker = 'sel'; width = 2.2; }
+
+  const d = edgePath(e);
+  // wide invisible hit area
+  el('path', { d, fill:'none', stroke:'transparent', 'stroke-width':14, 'pointer-events':'stroke' }, g);
+  el('path', { d, fill:'none', stroke, 'stroke-width':width,
+    'marker-end':`url(#arr-${marker})`, ...(dash ? {'stroke-dasharray':dash} : {}) }, g);
+  if(dim) g.classList.add('dim');
+  if(isCycle){ const t = el('title', null, g); t.textContent = 'Part of a loop.'; }
+
+  // label badge + delete × at midpoint
+  const mid = edgeMidpoint(e);
+  if(e.label){
+    const tw = e.label.length * 7 + 12;
+    const bg = el('g', null, g);
+    el('rect', { x:mid.x - tw/2, y:mid.y - 16, width:tw, height:17, rx:4,
+      fill:'#fff', stroke:'#d0d7de' }, bg);
+    const t = el('text', { x:mid.x, y:mid.y - 4, 'text-anchor':'middle', 'font-size':11, fill:'#57606a' }, bg);
+    t.textContent = e.label;
+    if(dim) bg.classList.add('dim');
+  }
+  if(isSel){
+    const dg = el('g', { class:'edge-x', 'data-id':e.id, cursor:'pointer' }, g);
+    el('circle', { cx:mid.x, cy:mid.y + (e.label ? 14 : 0), r:8, fill:'#fff', stroke:'#0969da', 'stroke-width':1.5 }, dg);
+    const t = el('text', { x:mid.x, y:mid.y + (e.label ? 18 : 4), 'text-anchor':'middle',
+      'font-size':12, fill:'#0969da', 'pointer-events':'none' }, dg);
+    t.textContent = '×';
+  }
+}
+
+/* ---------- blocks ---------- */
+function renderBlock(b){
+  const p = blockPos(b);
+  const g = el('g', { class:'block', 'data-id':b.id, transform:`translate(${p.x},${p.y})` }, gBlocks);
+
+  const shape = shapeEl(b, g);
+  const isSel = sel.blocks.has(b.id);
+  const isCycle = cycleSet.blocks.has(b.id);
+
+  let stroke = CRIT_COLORS[b.criticality] ?? '#d0d7de';
+  let sw = b.criticality ? 2.5 : 1;
+  if(isCycle){ stroke = '#ff9800'; sw = 2; shape.setAttribute('stroke-dasharray','6 4'); }
+  if(trace && hoverId){
+    if(trace.up.blocks.has(b.id)){ stroke = '#1e88e5'; sw = 2.5; }
+    else if(trace.down.blocks.has(b.id)){ stroke = '#43a047'; sw = 2.5; }
+    else if(b.id !== hoverId) g.classList.add('dim');
+  }
+  if(isSel){
+    // selection = outer blue ring + shadow, so the criticality color stays visible
+    g.setAttribute('filter','url(#selShadow)');
+    el('rect', { x:-4.5, y:-4.5, width:b.w+9, height:b.h+9, rx:8, ry:8,
+      fill:'none', stroke:'#0969da', 'stroke-width':2, 'pointer-events':'none' }, g);
+  }
+  shape.setAttribute('stroke', stroke);
+  shape.setAttribute('stroke-width', sw);
+
+  if(isCycle){ const t = el('title', null, g); t.textContent = 'Part of a loop.'; }
+
+  // label
+  const t = el('text', { x:b.w/2, y:b.h/2 + 4.5, 'text-anchor':'middle', 'font-size':13,
+    fill:'#1f2328', 'pointer-events':'none' }, g);
+  t.textContent = truncate(b.label || '(untitled)', b.w - 22);
+
+  // leads
+  el('circle', { class:'lead lead-in',  'data-id':b.id, cx:0,    cy:b.h/2, r:5.5 }, g);
+  el('circle', { class:'lead lead-out', 'data-id':b.id, cx:b.w,  cy:b.h/2, r:5.5 }, g);
+}
+
+/* ---------- overlay: pending connection, marquee, guides ---------- */
+function renderOverlay(){
+  gOverlay.innerHTML = '';
+  if(gesture && gesture.type === 'connect'){
+    const a = blockById(gesture.fromId);
+    if(a){
+      const g2 = edgeGeomFromPoints(leadOut(a), { x:gesture.mx, y:gesture.my });
+      el('path', { d:g2.d, fill:'none', stroke:'#0969da', 'stroke-width':1.5, 'stroke-dasharray':'5 4',
+        'marker-end':'url(#arr-sel)' }, gOverlay);
+    }
+  }
+  if(gesture && gesture.type === 'marquee'){
+    const { x0,y0,mx,my } = gesture;
+    el('rect', { x:Math.min(x0,mx), y:Math.min(y0,my), width:Math.abs(mx-x0), height:Math.abs(my-y0),
+      fill:'rgba(9,105,218,.08)', stroke:'#0969da', 'stroke-width':1, 'stroke-dasharray':'4 3' }, gOverlay);
+  }
+  if(gesture && gesture.type === 'blockdrag' && gesture.guides){
+    for(const gd of gesture.guides){
+      if(gd.axis === 'v')
+        el('line', { x1:gd.at, y1:gd.from, x2:gd.at, y2:gd.to, stroke:'#ff4081', 'stroke-width':1, 'stroke-dasharray':'3 3' }, gOverlay);
+      else
+        el('line', { x1:gd.from, y1:gd.at, x2:gd.to, y2:gd.at, stroke:'#ff4081', 'stroke-width':1, 'stroke-dasharray':'3 3' }, gOverlay);
+    }
+  }
+}
+
+/* ============================================================
+   Table view — activities in approximate flow order, properties
+   as editable fields. Time to complete is computed (read-only).
+   ============================================================ */
+function renderTable(){
+  const wrap = $('#tableWrap');
+  const rows = flowOrder();
+  const teamOpts = enumOptions('ownerTeam'), stackOpts = enumOptions('softwareStack');
+  const relList = arr => arr.map(x => esc(x.label)).join(', ') || '—';
+  let html = `<table id="grid"><thead><tr>
+    <th class="num">#</th><th>Label</th><th>Type</th><th>Owner team</th><th>Owner person</th>
+    <th>Software stack</th><th>Criticality</th><th>Location</th><th>Scope</th>
+    <th class="num">Man-hours</th><th class="num">Resources</th><th class="num">Time to complete</th>
+    <th>Precedents</th><th>Dependents</th></tr></thead><tbody>`;
+  rows.forEach((b, i) => {
+    const ttc = timeToComplete(b);
+    html += `<tr data-id="${b.id}" class="${sel.blocks.has(b.id) ? 'sel' : ''} ${cycleSet.blocks.has(b.id) ? 'in-cycle' : ''}"
+      ${cycleSet.blocks.has(b.id) ? 'title="Part of a loop."' : ''}>
+      <td class="ord">${i + 1}</td>
+      <td><input type="text" data-prop="label" value="${esc(b.label)}"></td>
+      <td>${BLOCK_TYPES[b.type].name}</td>
+      <td><select data-prop="ownerTeam">${enumHtml(teamOpts, b.ownerTeam)}</select></td>
+      <td><input type="text" data-prop="ownerPerson" value="${esc(b.ownerPerson)}"></td>
+      <td><select data-prop="softwareStack">${enumHtml(stackOpts, b.softwareStack)}</select></td>
+      <td><select data-prop="criticality">${CRITS.map(c => `<option value="${c}" ${c === b.criticality ? 'selected' : ''}>${c || '— unset —'}</option>`).join('')}</select></td>
+      <td><input type="text" data-prop="location" value="${esc(b.location)}"></td>
+      <td><input type="text" data-prop="scope" value="${esc(b.scope)}"></td>
+      <td class="num"><input type="number" data-prop="manHours" min="0" step="0.5" value="${b.manHours ?? ''}"></td>
+      <td class="num"><input type="number" data-prop="resources" min="1" step="1" value="${b.resources ?? ''}"></td>
+      <td class="num ttc">${fmtHours(ttc)}</td>
+      <td class="rel" title="${esc(relList(precedentsOf(b.id)))}">${esc(relList(precedentsOf(b.id)))}</td>
+      <td class="rel" title="${esc(relList(dependentsOf(b.id)))}">${esc(relList(dependentsOf(b.id)))}</td>
+    </tr>`;
+  });
+  html += `</tbody></table>`;
+  wrap.innerHTML = html;
+}
+
+// cell edits (delegated — fires on 'change', i.e. after editing is done)
+$('#tableWrap').addEventListener('change', ev => {
+  const t = ev.target, tr = t.closest('tr');
+  if(!tr || !t.dataset.prop) return;
+  const b = blockById(tr.getAttribute('data-id'));
+  if(!b) return;
+  const prop = t.dataset.prop;
+  if(t.value === '__add__'){
+    const v = prompt('Add new option:');
+    if(v && v.trim()){ commit(); b[prop] = v.trim(); afterMutation(); renderPanel(); }
+    return;
+  }
+  commit();
+  if(prop === 'manHours') b.manHours = t.value === '' ? null : Math.max(0, Number(t.value));
+  else if(prop === 'resources') b.resources = t.value === '' ? null : Math.max(1, Math.round(Number(t.value)));
+  else b[prop] = t.value.trim();
+  afterMutation(); renderPanel();
+});
+// row selection (clicking outside of editors)
+$('#tableWrap').addEventListener('click', ev => {
+  if(ev.target.matches('input, select, textarea')) return;
+  const tr = ev.target.closest('tr[data-id]');
+  if(!tr) return;
+  const id = tr.getAttribute('data-id');
+  if(ev.shiftKey){ sel.blocks.has(id) ? sel.blocks.delete(id) : sel.blocks.add(id); sel.edges.clear(); renderPanel(); render(); }
+  else selectOnly('block', id);
+  render();
+});
+
+/* ============================================================
+   Interactions
+   ============================================================ */
+
+/* ---------- selection ---------- */
+function clearSel(){ sel.blocks.clear(); sel.edges.clear(); renderPanel(); }
+function selectOnly(kind, id){
+  sel.blocks.clear(); sel.edges.clear();
+  if(kind === 'block') sel.blocks.add(id); else sel.edges.add(id);
+  renderPanel();
+}
+function deleteSelected(){
+  if(!sel.blocks.size && !sel.edges.size) return;
+  commit();
+  doc.edges = doc.edges.filter(e => !sel.edges.has(e.id) && !sel.blocks.has(e.from) && !sel.blocks.has(e.to));
+  doc.blocks = doc.blocks.filter(b => !sel.blocks.has(b.id));
+  sel.blocks.clear(); sel.edges.clear();
+  hoverId = null; trace = null;
+  afterMutation(); renderPanel();
+}
+function duplicateSelected(){
+  if(!sel.blocks.size) return;
+  commit();
+  const map = new Map(); const newIds = [];
+  for(const id of sel.blocks){
+    const b = blockById(id); if(!b) continue;
+    const nb = JSON.parse(JSON.stringify(b));
+    nb.id = uid(); nb.x += 20; nb.y += 20;
+    map.set(id, nb.id); doc.blocks.push(nb); newIds.push(nb.id);
+  }
+  for(const e of [...doc.edges]){
+    if(map.has(e.from) && map.has(e.to))
+      doc.edges.push({ id:uid(), from:map.get(e.from), to:map.get(e.to), label:e.label });
+  }
+  sel.blocks = new Set(newIds); sel.edges.clear();
+  afterMutation(); renderPanel();
+  toast('Block duplicated');
+}
+
+/* ---------- edge creation guardrails ---------- */
+function tryConnect(fromId, toId){
+  if(fromId === toId){ toast('Self-connections are not allowed'); return; }
+  if(doc.edges.some(e => e.from === fromId && e.to === toId)){ toast('Connection already exists'); return; }
+  commit();
+  doc.edges.push({ id:uid(), from:fromId, to:toId, label:'' });
+  afterMutation();
+}
+
+/* ---------- pointer handling ---------- */
+function evPos(ev){ return screenToWorld(ev.clientX, ev.clientY); }
+function hitBlock(ev){
+  const n = ev.target.closest && ev.target.closest('.block');
+  return n ? n.getAttribute('data-id') : null;
+}
+function hitEdge(ev){
+  const n = ev.target.closest && ev.target.closest('.edge');
+  return n ? n.getAttribute('data-id') : null;
+}
+
+svg.addEventListener('pointerdown', ev => {
+  svg.focus();
+  hideLeadPop();
+  const w = evPos(ev);
+
+  // pan: middle button or space+drag
+  if(ev.button === 1 || (spaceDown && ev.button === 0)){
+    gesture = { type:'pan', sx:ev.clientX, sy:ev.clientY, tx:view().tx, ty:view().ty };
+    svg.classList.add('panning'); ev.preventDefault(); return;
+  }
+  if(ev.button !== 0) return;
+
+  // lead: start connection (output) or open list (either)
+  const lead = ev.target.closest && ev.target.closest('.lead');
+  if(lead){
+    const id = lead.getAttribute('data-id');
+    if(lead.classList.contains('lead-out')){
+      gesture = { type:'connect', fromId:id, mx:w.x, my:w.y, moved:false };
+      svg.classList.add('connecting');
+    } else {
+      openLeadPop(id, 'in', ev.clientX, ev.clientY);
+    }
+    ev.preventDefault(); return;
+  }
+
+  // edge delete × at midpoint
+  const ex = ev.target.closest && ev.target.closest('.edge-x');
+  if(ex){
+    commit();
+    doc.edges = doc.edges.filter(e => e.id !== ex.getAttribute('data-id'));
+    sel.edges.delete(ex.getAttribute('data-id'));
+    afterMutation(); renderPanel(); return;
+  }
+
+  // block: select + maybe drag
+  const bid = hitBlock(ev);
+  if(bid){
+    if(ev.shiftKey){
+      sel.blocks.has(bid) ? sel.blocks.delete(bid) : sel.blocks.add(bid);
+      sel.edges.clear(); renderPanel(); render(); return;
+    }
+    if(!sel.blocks.has(bid)){ selectOnly('block', bid); }
+    // prepare drag (selection may include several blocks)
+    const ids = [...sel.blocks];
+    const offMap = new Map();
+    for(const id of ids){
+      const b = blockById(id); const p = blockPos(b);
+      offMap.set(id, { dx: w.x - p.x, dy: w.y - p.y });
+    }
+    gesture = { type:'blockdrag', ids, matrixIds:new Set(ids), offMap, mx:w.x, my:w.y,
+      startX:w.x, startY:w.y, moved:false, guides:null, hoverCell:null,
+      orig: new Map(ids.map(id => { const b = blockById(id); return [id, {x:b.x, y:b.y}]; })) };
+    ev.preventDefault(); return;
+  }
+
+  // edge: select
+  const eid = hitEdge(ev);
+  if(eid){
+    if(ev.shiftKey){ sel.edges.has(eid) ? sel.edges.delete(eid) : sel.edges.add(eid); }
+    else selectOnly('edge', eid);
+    render(); return;
+  }
+
+  // empty canvas: marquee (left button)
+  if(!ev.shiftKey) clearSel();
+  gesture = { type:'marquee', x0:w.x, y0:w.y, mx:w.x, my:w.y, additive:ev.shiftKey };
+  render();
+});
+
+window.addEventListener('pointermove', ev => {
+  if(!gesture) return;
+  const w = evPos(ev);
+
+  if(gesture.type === 'pan'){
+    view().tx = gesture.tx + (ev.clientX - gesture.sx);
+    view().ty = gesture.ty + (ev.clientY - gesture.sy);
+    render(); return;
+  }
+  if(gesture.type === 'connect'){
+    gesture.mx = w.x; gesture.my = w.y; gesture.moved = true;
+    renderOverlay(); return;
+  }
+  if(gesture.type === 'marquee'){
+    gesture.mx = w.x; gesture.my = w.y;
+    const x1 = Math.min(gesture.x0,w.x), x2 = Math.max(gesture.x0,w.x);
+    const y1 = Math.min(gesture.y0,w.y), y2 = Math.max(gesture.y0,w.y);
+    if(!gesture.additive) sel.blocks.clear();
+    for(const b of doc.blocks){
+      const p = blockPos(b);
+      if(p.x < x2 && p.x + b.w > x1 && p.y < y2 && p.y + b.h > y1) sel.blocks.add(b.id);
+    }
+    renderPanel(); render(); return;
+  }
+  if(gesture.type === 'blockdrag'){
+    if(Math.abs(w.x - gesture.startX) + Math.abs(w.y - gesture.startY) > 2) gesture.moved = true;
+    if(!gesture.moved) return;
+    gesture.mx = w.x; gesture.my = w.y;
+    if(doc.mode === 'canvas'){
+      // apply snapped positions + compute alignment guides
+      const dx = w.x - gesture.startX, dy = w.y - gesture.startY;
+      const first = blockById(gesture.ids[0]);
+      const o = gesture.orig.get(gesture.ids[0]);
+      const nx = Math.round((o.x + dx) / SNAP) * SNAP;
+      const ny = Math.round((o.y + dy) / SNAP) * SNAP;
+      const sx = nx - o.x, sy = ny - o.y;
+      for(const id of gesture.ids){
+        const b = blockById(id); const oo = gesture.orig.get(id);
+        b.x = oo.x + sx; b.y = oo.y + sy;
+      }
+      gesture.guides = computeGuides(first);
+    } else {
+      gesture.hoverCell = cellAt(w.x, w.y);
+    }
+    render(); return;
+  }
+});
+
+window.addEventListener('pointerup', ev => {
+  if(!gesture) return;
+  const g = gesture; gesture = null;
+  svg.classList.remove('panning','connecting');
+
+  if(g.type === 'pan'){ save(); render(); return; }
+
+  if(g.type === 'connect'){
+    const targetId = hitBlock(ev) || (ev.target.closest('.lead') && ev.target.closest('.lead').getAttribute('data-id'));
+    if(targetId) tryConnect(g.fromId, targetId);
+    else render();
+    return;
+  }
+
+  if(g.type === 'marquee'){ render(); renderPanel(); return; }
+
+  if(g.type === 'blockdrag'){
+    if(!g.moved){ render(); return; }   // plain click — selection already applied
+    if(doc.mode === 'canvas'){
+      commitMove(g, () => {});          // positions already mutated live; commit snapshot BEFORE is gone → use orig restore trick
+      afterMutation();
+    } else if(g.hoverCell){
+      // drag-to-reassign in matrix / hybrid mode
+      const L = activeLayout();
+      const { ci, ri } = g.hoverCell;
+      const col = L.cols[ci], row = L.rows[ri];
+      const { xProp, yProp } = doc.matrix;
+      // 'type' is a fixed shape and cannot be reassigned by dragging
+      const xMut = xProp !== 'type', yMut = yProp !== 'type';
+      const changed = g.ids.some(id => {
+        const b = blockById(id);
+        return (xMut && blockAxisVal(b,xProp) !== col.val) || (yMut && blockAxisVal(b,yProp) !== row.val);
+      });
+      if(changed){
+        commit();
+        for(const id of g.ids){
+          const b = blockById(id);
+          if(xMut) b[xProp] = col.val;
+          if(yMut) b[yProp] = row.val;
+        }
+        afterMutation();
+        toast(`Reassigned → ${col.label} / ${row.label}`);
+      } else render();
+    } else render();
+    return;
+  }
+});
+
+/* commit a canvas drag as one undo step (positions were mutated live) */
+function commitMove(g, apply){
+  undoStack.push(snapshotWithPositions(g));
+  if(undoStack.length > 100) undoStack.shift();
+  redoStack.length = 0; updateUndoBtns();
+}
+function snapshotWithPositions(g){
+  const cur = JSON.stringify({ blocks:doc.blocks, edges:doc.edges, matrix:doc.matrix });
+  // reconstruct pre-drag positions
+  const pre = JSON.parse(cur);
+  for(const b of pre.blocks){
+    if(g.orig.has(b.id)){ b.x = g.orig.get(b.id).x; b.y = g.orig.get(b.id).y; }
+  }
+  return JSON.stringify(pre);
+}
+
+/* ---------- alignment guides (canvas mode) ---------- */
+function computeGuides(dragged){
+  if(!dragged) return null;
+  const guides = [];
+  const thr = 5 / view().k;
+  const dPtsX = [dragged.x, dragged.x + dragged.w/2, dragged.x + dragged.w];
+  const dPtsY = [dragged.y, dragged.y + dragged.h/2, dragged.y + dragged.h];
+  let gx1=1e9, gx2=-1e9, gy1=1e9, gy2=-1e9;
+  for(const b of doc.blocks){
+    if(sel.blocks.has(b.id)) continue;
+    const oPtsX = [b.x, b.x + b.w/2, b.x + b.w];
+    const oPtsY = [b.y, b.y + b.h/2, b.y + b.h];
+    for(const dx of dPtsX) for(const ox of oPtsX){
+      if(Math.abs(dx - ox) < thr){
+        guides.push({ axis:'v', at:ox, from:Math.min(b.y, dragged.y) - 12, to:Math.max(b.y+b.h, dragged.y+dragged.h) + 12 });
+      }
+    }
+    for(const dy of dPtsY) for(const oy of oPtsY){
+      if(Math.abs(dy - oy) < thr){
+        guides.push({ axis:'h', at:oy, from:Math.min(b.x, dragged.x) - 12, to:Math.max(b.x+b.w, dragged.x+dragged.w) + 12 });
+      }
+    }
+  }
+  return guides.length ? guides : null;
+}
+
+/* ---------- hover tracing ---------- */
+svg.addEventListener('pointermove', ev => {
+  if(gesture) return;
+  const bid = hitBlock(ev);
+  if(bid === hoverId){ if(!bid && trace) {/* noop */} else return; }
+  hoverId = bid || null;
+  trace = hoverId ? computeTrace(hoverId) : null;
+  render();
+});
+
+/* ---------- wheel zoom to cursor ---------- */
+svg.addEventListener('wheel', ev => {
+  ev.preventDefault();
+  const v = view();
+  const r = svg.getBoundingClientRect();
+  const mx = ev.clientX - r.left, my = ev.clientY - r.top;
+  const factor = Math.exp(-ev.deltaY * 0.0015);
+  const k2 = clamp(v.k * factor, 0.15, 3);
+  v.tx = mx - (mx - v.tx) * (k2 / v.k);
+  v.ty = my - (my - v.ty) * (k2 / v.k);
+  v.k = k2;
+  render(); save();
+}, { passive:false });
+
+/* ---------- double-click inline label edit ---------- */
+svg.addEventListener('dblclick', ev => {
+  const bid = hitBlock(ev);
+  if(!bid) return;
+  const b = blockById(bid);
+  const p = blockPos(b);
+  const sp = worldToScreen(p.x, p.y);
+  const inp = $('#inlineEdit');
+  inp.style.display = 'block';
+  inp.style.left = sp.x + 'px'; inp.style.top = (sp.y + b.h/2*view().k - 14) + 'px';
+  inp.style.width = Math.max(120, b.w * view().k) + 'px';
+  inp.value = b.label;
+  inp.focus(); inp.select();
+  inp.onkeydown = e2 => {
+    if(e2.key === 'Enter') inp.blur();
+    if(e2.key === 'Escape'){ inp.onblur = null; inp.style.display = 'none'; }
+  };
+  inp.onblur = () => {
+    inp.style.display = 'none';
+    const val = inp.value.trim();
+    if(val && val !== b.label){ commit(); b.label = val; afterMutation(); renderPanel(); }
+  };
+});
+
+/* ---------- keyboard ---------- */
+window.addEventListener('keydown', ev => {
+  if(ev.target instanceof Element && ev.target.matches('input, textarea, select')) return;
+  if(ev.code === 'Space' && !spaceDown){ spaceDown = true; svg.style.cursor = 'grab'; ev.preventDefault(); return; }
+  const mod = ev.ctrlKey || ev.metaKey;
+  if(mod && ev.key.toLowerCase() === 'z' && !ev.shiftKey){ undo(); ev.preventDefault(); }
+  else if(mod && (ev.key.toLowerCase() === 'y' || (ev.shiftKey && ev.key.toLowerCase() === 'z'))){ redo(); ev.preventDefault(); }
+  else if(mod && ev.key.toLowerCase() === 'd'){ duplicateSelected(); ev.preventDefault(); }
+  else if(ev.key === 'Delete' || ev.key === 'Backspace'){ deleteSelected(); ev.preventDefault(); }
+  else if(ev.key === '?'){ showShortcuts(); ev.preventDefault(); }
+  else if(ev.key === 'Escape'){ clearSel(); hideLeadPop(); render(); }
+});
+window.addEventListener('keyup', ev => {
+  if(ev.code === 'Space'){ spaceDown = false; svg.style.cursor = ''; }
+});
+
+/* ============================================================
+   Property panel
+   ============================================================ */
+const panel = $('#panel'), panelBody = $('#panelBody');
+
+/* Collapse handling: when collapsed, the panel slides away and a slim
+   "Properties" tab stays at the right edge — selection/dragging is then
+   completely unobstructed until the tab is clicked. State is persisted. */
+function applyPanelVisibility(){
+  const open = panel.classList.contains('open');
+  const collapsed = open && doc.ui.panelCollapsed;
+  panel.classList.toggle('collapsed', collapsed);
+  $('#panelTab').style.display = collapsed ? 'block' : 'none';
+}
+$('#panelCollapse').addEventListener('click', () => { doc.ui.panelCollapsed = true; save(); applyPanelVisibility(); });
+$('#panelTab').addEventListener('click', () => { doc.ui.panelCollapsed = false; save(); applyPanelVisibility(); });
+
+function enumOptions(prop){
+  const vals = new Set();
+  doc.blocks.forEach(b => { const v = (b[prop] || '').trim(); if(v) vals.add(v); });
+  return [...vals].sort((a,b) => a.localeCompare(b));
+}
+
+function renderPanel(){
+  renderPanelInner();
+  applyPanelVisibility();
+}
+function renderPanelInner(){
+  const ids = [...sel.blocks];
+  if(ids.length !== 1){
+    if(ids.length > 1){
+      panel.classList.add('open');
+      $('#panelTitle').textContent = `${ids.length} blocks selected`;
+      panelBody.innerHTML = `<p class="rel-empty">Multiple blocks selected. Delete or duplicate applies to all.</p>`;
+    } else if(sel.edges.size === 1){
+      renderEdgePanel(edgeById([...sel.edges][0]));
+    } else {
+      panel.classList.remove('open');
+    }
+    return;
+  }
+  const b = blockById(ids[0]);
+  if(!b){ panel.classList.remove('open'); return; }
+  panel.classList.add('open');
+  $('#panelTitle').textContent = 'Block properties';
+
+  const teamOpts = enumOptions('ownerTeam'), stackOpts = enumOptions('softwareStack');
+  panelBody.innerHTML = `
+    <div class="fld"><label>Label</label><input type="text" id="p-label" value="${esc(b.label)}"></div>
+    <div class="fld"><label>Type</label><input type="text" value="${BLOCK_TYPES[b.type].name}" disabled></div>
+    <div class="fld"><label>Owner team</label><select id="p-team">${enumHtml(teamOpts, b.ownerTeam)}</select></div>
+    <div class="fld"><label>Owner person</label><input type="text" id="p-person" value="${esc(b.ownerPerson)}"></div>
+    <div class="fld"><label>Software stack</label><select id="p-stack">${enumHtml(stackOpts, b.softwareStack)}</select></div>
+    <div class="fld"><label>Criticality</label><select id="p-crit">
+      ${CRITS.map(c => `<option value="${c}" ${c===b.criticality?'selected':''}>${c || '— unset —'}</option>`).join('')}
+    </select></div>
+    <div class="fld"><label>Location</label><input type="text" id="p-loc" value="${esc(b.location)}"></div>
+    <div class="fld"><label>Scope</label><textarea id="p-scope">${esc(b.scope)}</textarea></div>
+    <div class="fld"><label>Man-hours</label><input type="number" id="p-mh" min="0" step="0.5" value="${b.manHours ?? ''}"></div>
+    <div class="fld"><label>Assigned resources</label><input type="number" id="p-res" min="1" step="1" value="${b.resources ?? ''}"></div>
+    <div class="fld"><label>Time to complete (calculated)</label><input type="text" value="${fmtHours(timeToComplete(b))}" disabled></div>
+    <div class="fld"><label>Precedents (derived)</label><ul class="rel-list" id="p-prec"></ul></div>
+    <div class="fld"><label>Dependents (derived)</label><ul class="rel-list" id="p-dep"></ul></div>`;
+
+  const relHtml = arr => arr.length
+    ? arr.map(x => `<li data-id="${x.id}">${esc(x.label)}</li>`).join('')
+    : `<li class="rel-empty" style="border:none;background:none">None</li>`;
+  $('#p-prec').innerHTML = relHtml(precedentsOf(b.id));
+  $('#p-dep').innerHTML  = relHtml(dependentsOf(b.id));
+  panelBody.querySelectorAll('.rel-list li[data-id]').forEach(li =>
+    li.addEventListener('click', () => { selectOnly('block', li.getAttribute('data-id')); render(); }));
+
+  const updText = (id, prop) => $(id).addEventListener('change', e => {
+    commit(); b[prop] = e.target.value.trim(); afterMutation();
+  });
+  updText('#p-label','label'); updText('#p-person','ownerPerson');
+  updText('#p-loc','location'); updText('#p-scope','scope');
+  $('#p-crit').addEventListener('change', e => { commit(); b.criticality = e.target.value; afterMutation(); });
+  $('#p-mh').addEventListener('change', e => {
+    commit();
+    b.manHours = e.target.value === '' ? null : Math.max(0, Number(e.target.value));
+    afterMutation(); renderPanel();   // re-render to refresh calculated time
+  });
+  $('#p-res').addEventListener('change', e => {
+    commit();
+    b.resources = e.target.value === '' ? null : Math.max(1, Math.round(Number(e.target.value)));
+    afterMutation(); renderPanel();
+  });
+
+  const updEnum = (id, prop) => $(id).addEventListener('change', e => {
+    if(e.target.value === '__add__'){
+      const v = prompt('Add new option:');
+      if(v && v.trim()){ commit(); b[prop] = v.trim(); afterMutation(); renderPanel(); }
+      else renderPanel();
+      return;
+    }
+    commit(); b[prop] = e.target.value; afterMutation();
+  });
+  updEnum('#p-team','ownerTeam'); updEnum('#p-stack','softwareStack');
+}
+function enumHtml(opts, cur){
+  const o = [`<option value="">— unset —</option>`];
+  for(const v of opts) o.push(`<option value="${esc(v)}" ${v===cur?'selected':''}>${esc(v)}</option>`);
+  o.push(`<option value="__add__">＋ Add new…</option>`);
+  if(cur && !opts.includes(cur))
+    o.splice(1, 0, `<option value="${esc(cur)}" selected>${esc(cur)}</option>`);
+  return o.join('');
+}
+function renderEdgePanel(e){
+  if(!e){ panel.classList.remove('open'); return; }
+  panel.classList.add('open');
+  $('#panelTitle').textContent = 'Edge properties';
+  const a = blockById(e.from), b = blockById(e.to);
+  panelBody.innerHTML = `
+    <div class="fld"><label>From</label><input type="text" value="${esc(a ? a.label : '?')}" disabled></div>
+    <div class="fld"><label>To</label><input type="text" value="${esc(b ? b.label : '?')}" disabled></div>
+    <div class="fld"><label>Label</label><input type="text" id="e-label" value="${esc(e.label)}" placeholder="e.g. yes / no"></div>`;
+  $('#e-label').addEventListener('change', ev => { commit(); e.label = ev.target.value.trim(); afterMutation(); });
+}
+$('#panelClose').addEventListener('click', () => { clearSel(); render(); });
+$('#panelDel').addEventListener('click', deleteSelected);
+$('#panelDup').addEventListener('click', duplicateSelected);
+
+/* ============================================================
+   Lead connections popup
+   ============================================================ */
+const leadPop = $('#leadPop');
+function openLeadPop(blockId, dir, cx, cy){
+  const b = blockById(blockId); if(!b) return;
+  const edges = dir === 'in' ? inEdges(blockId) : outEdges(blockId);
+  leadPop.innerHTML = `<h4>${dir === 'in' ? 'Incoming' : 'Outgoing'} connections — ${esc(b.label)}</h4>`;
+  if(!edges.length)
+    leadPop.innerHTML += `<div class="rel-empty" style="padding:4px 2px">No connections</div>`;
+  for(const e of edges){
+    const other = blockById(dir === 'in' ? e.from : e.to);
+    const row = document.createElement('div');
+    row.className = 'lp-row';
+    row.innerHTML = `<span class="who">${dir === 'in' ? '←' : '→'} ${esc(other ? other.label : '?')}</span>
+      <input type="text" value="${esc(e.label)}" placeholder="label" title="Edge label">
+      <button title="Remove connection">✕</button>`;
+    row.querySelector('input').addEventListener('change', ev => { commit(); e.label = ev.target.value.trim(); afterMutation(); });
+    row.querySelector('button').addEventListener('click', () => {
+      commit(); doc.edges = doc.edges.filter(x => x.id !== e.id); afterMutation(); openLeadPop(blockId, dir, cx, cy);
+    });
+    leadPop.appendChild(row);
+  }
+  leadPop.style.display = 'block';
+  leadPop.style.left = clamp(cx + 8, 8, innerWidth - 260) + 'px';
+  leadPop.style.top  = clamp(cy - 10, 50, innerHeight - 120) + 'px';
+}
+function hideLeadPop(){ leadPop.style.display = 'none'; }
+document.addEventListener('pointerdown', ev => {
+  if(!leadPop.contains(ev.target) && !(ev.target.closest && ev.target.closest('.lead'))) hideLeadPop();
+}, true);
+
+/* ============================================================
+   Toolbar
+   ============================================================ */
+function setMode(m){
+  if(doc.mode === m) return;
+  doc.mode = m;
+  setModeUI(m);
+  save(); render();
+}
+$('#modeCanvas').addEventListener('click', () => setMode('canvas'));
+$('#modeMatrix').addEventListener('click', () => setMode('matrix'));
+$('#modeHybrid').addEventListener('click', () => setMode('hybrid'));
+$('#modeTable').addEventListener('click', () => setMode('table'));
+
+$('#edgeStyle').addEventListener('change', ev => {
+  doc.edgeStyle = ev.target.value;
+  save(); render();
+});
+
+function fillAxisDropdowns(){
+  for(const id of ['#axisX','#axisY']){
+    const s = $(id);
+    s.innerHTML = AXIS_PROPS.map(([v,n]) => `<option value="${v}">${n}</option>`).join('');
+  }
+  $('#axisX').value = doc.matrix.xProp;
+  $('#axisY').value = doc.matrix.yProp;
+}
+function axisChanged(){
+  const x = $('#axisX').value, y = $('#axisY').value;
+  if(x === y){
+    toast('X and Y axes must be different properties');
+    fillAxisDropdowns(); return;   // revert
+  }
+  doc.matrix.xProp = x; doc.matrix.yProp = y;
+  save(); render();
+}
+$('#axisX').addEventListener('change', axisChanged);
+$('#axisY').addEventListener('change', axisChanged);
+
+// add-block dropdown
+const addDD = $('#addDD'), addMenu = $('#addMenu');
+for(const [type, t] of Object.entries(BLOCK_TYPES)){
+  const item = document.createElement('div');
+  item.className = 'dd-item';
+  item.innerHTML = `<svg width="22" height="16">${typeIcon(type)}</svg> ${t.name}`;
+  item.addEventListener('click', () => {
+    addDD.classList.remove('open');
+    const r = svg.getBoundingClientRect(); const v = view();
+    const cx = (r.width/2 - v.tx)/v.k, cy = (r.height/2 - v.ty)/v.k;
+    commit();
+    const b = makeBlock(type,
+      Math.round((cx - t.w/2)/SNAP)*SNAP, Math.round((cy - t.h/2)/SNAP)*SNAP);
+    doc.blocks.push(b);
+    selectOnly('block', b.id);
+    afterMutation();
+  });
+  addMenu.appendChild(item);
+}
+function typeIcon(type){
+  switch(type){
+    case 'decision':   return `<polygon points="8,0 16,8 8,16 0,8" fill="#fff" stroke="#57606a"/>`;
+    case 'terminator': return `<rect x="0" y="2" width="16" height="12" rx="6" fill="#fff" stroke="#57606a"/>`;
+    case 'data':       return `<polygon points="4,1 17,1 13,15 0,15" fill="#fff" stroke="#57606a"/>`;
+    case 'document':   return `<path d="M1,1 H15 V12 Q11,16 8,12 T1,12 Z" fill="#fff" stroke="#57606a"/>`;
+    default:           return `<rect x="1" y="2" width="14" height="12" rx="2" fill="#fff" stroke="#57606a"/>`;
+  }
+}
+$('#addBtn').addEventListener('click', () => addDD.classList.toggle('open'));
+document.addEventListener('pointerdown', ev => {
+  if(!addDD.contains(ev.target)) addDD.classList.remove('open');
+  if(!helpDD.contains(ev.target)) helpDD.classList.remove('open');
+});
+
+$('#dupBtn').addEventListener('click', duplicateSelected);
+$('#delBtn').addEventListener('click', deleteSelected);
+$('#undoBtn').addEventListener('click', undo);
+$('#redoBtn').addEventListener('click', redo);
+$('#zoomIn').addEventListener('click', () => zoomStep(1.25));
+$('#zoomOut').addEventListener('click', () => zoomStep(0.8));
+$('#zoomPct').addEventListener('click', () => { view().k = 1; render(); save(); });
+$('#fitBtn').addEventListener('click', fitToView);
+
+function zoomStep(f){
+  const v = view(); const r = svg.getBoundingClientRect();
+  const mx = r.width/2, my = r.height/2;
+  const k2 = clamp(v.k * f, 0.15, 3);
+  v.tx = mx - (mx - v.tx) * (k2 / v.k);
+  v.ty = my - (my - v.ty) * (k2 / v.k);
+  v.k = k2; render(); save();
+}
+function fitToView(){
+  const bb = contentBBox(50);
+  const r = svg.getBoundingClientRect();
+  const k = clamp(Math.min(r.width / bb.w, r.height / bb.h), 0.15, 2);
+  const v = view();
+  v.k = k;
+  v.tx = (r.width - bb.w * k) / 2 - bb.x * k;
+  v.ty = (r.height - bb.h * k) / 2 - bb.y * k;
+  render(); save();
+}
+
+/* ============================================================
+   Export / Import
+   ============================================================ */
+function download(name, content, mime){
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([content], { type:mime || 'application/octet-stream' }));
+  a.download = name;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+}
+$('#expJson').addEventListener('click', () => {
+  download('flowmap.json', JSON.stringify(doc, null, 2), 'application/json');
+});
+$('#impJson').addEventListener('click', () => $('#fileInput').click());
+$('#fileInput').addEventListener('change', ev => {
+  const f = ev.target.files[0]; if(!f) return;
+  const rd = new FileReader();
+  rd.onload = () => {
+    try{
+      const d = JSON.parse(rd.result);
+      if(!d || d.schemaVersion !== 1 || !Array.isArray(d.blocks) || !Array.isArray(d.edges))
+        throw new Error('bad schema');
+      if(!confirm('Import will replace the current diagram. Continue?')) return;
+      doc = Object.assign(newDoc(), d);
+      doc.views = Object.assign(newDoc().views, doc.views || {});
+      doc.ui = Object.assign(newDoc().ui, doc.ui || {});
+      normalizeBlocks();
+      undoStack = []; redoStack = []; updateUndoBtns();
+      clearSel();
+      setModeUI(doc.mode);
+      $('#edgeStyle').value = doc.edgeStyle;
+      afterMutation();
+      toast('Diagram imported');
+    }catch(err){ toast('Invalid flowmap JSON file'); }
+  };
+  rd.readAsText(f);
+  ev.target.value = '';
+});
+
+/* OPTIONAL (nice-to-have): PNG export of the current viewport.
+   Serializes the SVG into an offscreen canvas. Uses only system fonts, so it
+   works fully offline. If rasterization fails in some browser, a toast
+   explains instead of breaking anything. */
+$('#expPng').addEventListener('click', () => {
+  try{
+    const r = svg.getBoundingClientRect();
+    const clone = svg.cloneNode(true);
+    clone.setAttribute('xmlns', SVGNS);
+    clone.setAttribute('width', r.width); clone.setAttribute('height', r.height);
+    const css = document.createElement('style');
+    css.textContent = '.lead{fill:#fff;stroke:#57606a;stroke-width:1.5}.block.dim,.edge.dim{opacity:.25}';
+    clone.insertBefore(css, clone.firstChild);
+    const url = URL.createObjectURL(new Blob([new XMLSerializer().serializeToString(clone)], { type:'image/svg+xml' }));
+    const img = new Image();
+    img.onload = () => {
+      const c = document.createElement('canvas');
+      c.width = r.width * 2; c.height = r.height * 2;
+      const ctx = c.getContext('2d');
+      ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, c.width, c.height);
+      ctx.scale(2, 2); ctx.drawImage(img, 0, 0);
+      URL.revokeObjectURL(url);
+      c.toBlob(blob => {
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob); a.download = 'flowmap.png';
+        document.body.appendChild(a); a.click(); a.remove();
+        setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+      });
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); toast('PNG export is not supported in this browser'); };
+    img.src = url;
+  }catch(err){ toast('PNG export failed'); }
+});
+
+/* ============================================================
+   First-run hint, help menu, shortcuts sheet, version toast
+   ============================================================ */
+function showHint(){
+  const scrim = document.createElement('div');
+  scrim.className = 'scrim';
+  scrim.innerHTML = `<div class="card" role="dialog" aria-label="Welcome to FlowMap">
+    <h2>Welcome to FlowMap</h2>
+    <p>This is a sample process. Everything is editable and stays in your browser — no account needed.</p>
+    <p>Try switching modes above: blocks auto-arrange into a Matrix, flow-ordered Hybrid lanes, and an editable Table.</p>
+    <div class="card-actions">
+      <button class="btn-primary" id="hintStart">Start exploring</button>
+      <button class="linklike" id="hintNever">Don't show again</button>
+    </div></div>`;
+  document.body.appendChild(scrim);
+  const modeBtns = ['#modeCanvas','#modeMatrix','#modeHybrid','#modeTable'].map(s => $(s));
+  modeBtns.forEach(b => b.classList.add('hint-pulse'));
+  const onKey = ev => { if(ev.key === 'Escape'){ dismiss(); ev.stopPropagation(); } };
+  function dismiss(){
+    try{ localStorage.setItem(HINT_KEY, '1'); }catch(e){}
+    scrim.remove();
+    modeBtns.forEach(b => b.classList.remove('hint-pulse'));
+    window.removeEventListener('keydown', onKey, true);
+  }
+  window.addEventListener('keydown', onKey, true);
+  scrim.querySelector('#hintStart').addEventListener('click', dismiss);
+  scrim.querySelector('#hintNever').addEventListener('click', dismiss);
+  // NOTE: scrim click deliberately does NOT dismiss (too easy to hit mid-drag)
+}
+
+/* generic dismissible modal card (Esc / ✕ / scrim-click) */
+function showCard(innerHtml, wide){
+  const scrim = document.createElement('div');
+  scrim.className = 'scrim';
+  scrim.innerHTML = `<div class="card ${wide ? 'wide' : ''}" role="dialog">${innerHtml}</div>`;
+  document.body.appendChild(scrim);
+  const onKey = ev => { if(ev.key === 'Escape'){ close(); ev.stopPropagation(); } };
+  function close(){ scrim.remove(); window.removeEventListener('keydown', onKey, true); }
+  window.addEventListener('keydown', onKey, true);
+  scrim.addEventListener('pointerdown', ev => { if(ev.target === scrim) close(); });
+  const x = scrim.querySelector('.x');
+  if(x) x.addEventListener('click', close);
+  return close;
+}
+
+function showShortcuts(){
+  showCard(`<h2>Keyboard shortcuts &amp; power moves <button class="x">✕</button></h2>
+  <div class="sc-cols">
+    <div class="sc-group"><h3>Blocks</h3><ul>
+      <li>Drag to move (snaps to 10px grid)</li>
+      <li>Double-click to rename</li>
+      <li><kbd>Ctrl</kbd>+<kbd>D</kbd> duplicate</li>
+      <li>Hover to trace up/downstream</li>
+    </ul></div>
+    <div class="sc-group"><h3>Connections</h3><ul>
+      <li>Drag from a block's right lead to another block</li>
+      <li>Click a left lead to manage its connections</li>
+      <li>Click an edge, then the × at its midpoint, to delete it</li>
+    </ul></div>
+    <div class="sc-group"><h3>Selection</h3><ul>
+      <li>Click to select · <kbd>Shift</kbd>+click to toggle</li>
+      <li>Drag on empty canvas for marquee</li>
+      <li><kbd>Esc</kbd> to clear</li>
+    </ul></div>
+    <div class="sc-group"><h3>Editing</h3><ul>
+      <li><kbd>Delete</kbd> removes selection</li>
+      <li><kbd>Ctrl</kbd>+<kbd>Z</kbd> undo · <kbd>Ctrl</kbd>+<kbd>Y</kbd> or <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Z</kbd> redo</li>
+    </ul></div>
+    <div class="sc-group"><h3>View</h3><ul>
+      <li>Mouse-wheel zooms to cursor</li>
+      <li>Middle-drag or <kbd>Space</kbd>+drag to pan</li>
+      <li><kbd>?</kbd> opens this sheet</li>
+    </ul></div>
+    <div class="sc-group"><h3>Modes</h3><ul>
+      <li>Canvas · Matrix · Hybrid · Table in the toolbar</li>
+      <li>Matrix/Hybrid: drag a block to another cell to reassign</li>
+    </ul></div>
+  </div>`, true);
+}
+function showWhatsNew(){
+  showCard(`<h2>What's new in v${APP_VERSION} <button class="x">✕</button></h2>
+  <ul style="padding-left:18px; margin-bottom:8px">
+    <li>Four views of the same data: Canvas, Matrix, Hybrid lanes, and an editable Table</li>
+    <li>Square (orthogonal) arrows by default, with a curved option</li>
+    <li>Effort fields: man-hours × assigned resources → calculated time to complete</li>
+    <li>Repeating flow-ordered lanes in Hybrid view</li>
+    <li>Installable, fully offline app (PWA) — everything stays on your device</li>
+  </ul>`);
+}
+function showAbout(){
+  showCard(`<h2>About &amp; Privacy <button class="x">✕</button></h2>
+  <p>FlowMap is a free, open-source process-flow mapping tool. All data is stored locally in your browser — nothing leaves your device.</p>
+  <p style="color:var(--muted)">FlowMap v${APP_VERSION}</p>`);
+}
+
+// ⓘ help menu (same dropdown pattern as Add-block)
+const helpDD = $('#helpDD'), helpMenu = $('#helpMenu');
+[
+  ['Keyboard shortcuts', () => showShortcuts()],
+  ["What's new",         () => showWhatsNew()],
+  ['About & Privacy',    () => showAbout()],
+  ['Feedback / Report a bug', () => window.open(FEEDBACK_URL, '_blank', 'noopener')],
+  ['View source on GitHub',   () => window.open(REPO_URL, '_blank', 'noopener')],
+].forEach(([label, fn]) => {
+  const item = document.createElement('div');
+  item.className = 'dd-item';
+  item.textContent = label;
+  item.addEventListener('click', () => { helpDD.classList.remove('open'); fn(); });
+  helpMenu.appendChild(item);
+});
+$('#helpBtn').addEventListener('click', () => helpDD.classList.toggle('open'));
+
+/* ============================================================
+   Init
+   ============================================================ */
+function setModeUI(m){
+  $('#modeCanvas').classList.toggle('active', m === 'canvas');
+  $('#modeMatrix').classList.toggle('active', m === 'matrix');
+  $('#modeHybrid').classList.toggle('active', m === 'hybrid');
+  $('#modeTable').classList.toggle('active', m === 'table');
+  $('#matrixAxes').style.display = (m === 'matrix' || m === 'hybrid') ? 'flex' : 'none';
+}
+function init(){
+  const loaded = load();
+  const isFirstRun = !loaded;          // simplest correct "demo on first run" signal
+  doc = loaded || demoDoc();
+  // migrate older saves: fill any fields introduced after schemaVersion 1 shipped
+  const base = newDoc();
+  doc.views = Object.assign(base.views, doc.views || {});
+  doc.ui = Object.assign(base.ui, doc.ui || {});
+  if(!doc.edgeStyle) doc.edgeStyle = 'square';
+  normalizeBlocks();
+  // version-update toast (§7): once per version, only for existing saved docs —
+  // first-run docs are not saved here so the hint signal (load() → null) survives
+  if(!isFirstRun && doc.appVersion !== APP_VERSION){
+    doc.appVersion = APP_VERSION;
+    save();
+    setTimeout(() => toast(`Updated to v${APP_VERSION} — see What's new in the ⓘ menu.`), 500);
+  }
+  doc.appVersion = APP_VERSION;
+  fillAxisDropdowns();
+  setModeUI(doc.mode);
+  $('#edgeStyle').value = doc.edgeStyle;
+  computeCycles();
+  render();
+  updateUndoBtns();
+  // first-run guided hint (§1): only when the demo was just created, never for upgrades
+  if(isFirstRun){
+    let seen = null;
+    try{ seen = localStorage.getItem(HINT_KEY); }catch(e){}
+    if(seen === null) showHint();
+  }
+}
+init();
+</script>
+</body>
+</html>
