@@ -88,10 +88,9 @@
   #matrixAxes select{max-width:150px; padding:3px 4px; border:1px solid var(--border); border-radius:6px; background:#fff;}
   .tb-spacer{flex:1;}
 
-  /* add-block dropdown */
-  .dd{position:relative;}
+  /* dropdown menus — position:fixed so the scrollable toolbar can't clip them */
   .dd-menu{
-    display:none; position:absolute; top:calc(100% + 4px); left:0; z-index:40;
+    display:none; position:fixed; z-index:40;
     background:#fff; border:1px solid var(--border); border-radius:8px; box-shadow:0 8px 24px rgba(140,149,159,.25);
     min-width:150px; padding:4px;
   }
@@ -284,7 +283,7 @@
   <div class="tb-group">
     <div class="dd" id="helpDD">
       <button class="tbtn" id="helpBtn" title="Help & about">ⓘ</button>
-      <div class="dd-menu" id="helpMenu" style="left:auto; right:0; min-width:190px;"></div>
+      <div class="dd-menu" id="helpMenu" style="min-width:190px;"></div>
     </div>
   </div>
 </div>
@@ -324,7 +323,7 @@
 const SVGNS = 'http://www.w3.org/2000/svg';
 const LS_KEY = 'flowmap.v1';
 const APP_VERSION = '1.0.0';
-const REPO_URL = 'https://github.com/<OWNER>/<REPO>';   // TODO: replace after repo exists
+const REPO_URL = 'https://github.com/processflowmap/flowmap';
 const FEEDBACK_URL = REPO_URL + '/issues/new/choose';   // single edit point for feedback links
 const HINT_KEY = 'flowmap.v1.hintSeen';
 const SNAP = 10;                       // 10px snap grid
@@ -1635,7 +1634,19 @@ function typeIcon(type){
     default:           return `<rect x="1" y="2" width="14" height="12" rx="2" fill="#fff" stroke="#57606a"/>`;
   }
 }
-$('#addBtn').addEventListener('click', () => addDD.classList.toggle('open'));
+/* Menus are position:fixed (toolbar scrolls horizontally on narrow screens, which
+   would clip absolute menus) — place at the button, clamped inside the viewport. */
+function placeMenu(btn, menu, alignRight){
+  const r = btn.getBoundingClientRect();
+  const maxLeft = Math.max(8, innerWidth - menu.offsetWidth - 8);
+  menu.style.top = (r.bottom + 4) + 'px';
+  menu.style.left = (alignRight ? clamp(r.right - menu.offsetWidth, 8, maxLeft)
+                                : clamp(r.left, 8, maxLeft)) + 'px';
+}
+$('#addBtn').addEventListener('click', () => {
+  addDD.classList.toggle('open');
+  if(addDD.classList.contains('open')) placeMenu($('#addBtn'), addMenu, false);
+});
 document.addEventListener('pointerdown', ev => {
   if(!addDD.contains(ev.target)) addDD.classList.remove('open');
   if(!helpDD.contains(ev.target)) helpDD.classList.remove('open');
@@ -1852,7 +1863,14 @@ const helpDD = $('#helpDD'), helpMenu = $('#helpMenu');
   item.addEventListener('click', () => { helpDD.classList.remove('open'); fn(); });
   helpMenu.appendChild(item);
 });
-$('#helpBtn').addEventListener('click', () => helpDD.classList.toggle('open'));
+$('#helpBtn').addEventListener('click', () => {
+  helpDD.classList.toggle('open');
+  if(helpDD.classList.contains('open')) placeMenu($('#helpBtn'), helpMenu, true);
+});
+// swiping the toolbar horizontally on touch devices closes any open menu
+$('#toolbar').addEventListener('scroll', () => {
+  addDD.classList.remove('open'); helpDD.classList.remove('open');
+}, { passive:true });
 
 /* ============================================================
    Init
