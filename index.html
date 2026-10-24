@@ -114,27 +114,43 @@
 
   /* ---------- Table view ---------- */
   #tableWrap{display:none; position:fixed; inset:46px 0 0 0; overflow:auto; background:#fff; padding:0 22px 30px; z-index:20;}
-  #grid{border-collapse:collapse; width:100%; font-size:13px;}
-  #grid th{
+  .grid{border-collapse:collapse; width:100%; font-size:13px;}
+  .grid th{
     position:sticky; top:0; z-index:2; background:#f6f8fa; border-bottom:2px solid var(--border);
     text-align:left; padding:8px 8px; font-size:11px; text-transform:uppercase; letter-spacing:.4px; color:var(--muted);
     white-space:nowrap;
   }
-  #grid td{padding:3px 8px; border-bottom:1px solid #eaeef2; vertical-align:middle;}
-  #grid td.num, #grid th.num{text-align:right;}
-  #grid tr:hover td{background:#f6f8fa;}
-  #grid tr.sel td{background:#ddf4ff;}
-  #grid tr.in-cycle td:first-child{border-left:3px solid #ff9800;}
-  #grid tr.in-cycle td:first-child::after{content:' ⟳'; color:#ff9800;}
-  #grid input[type=text], #grid input[type=number], #grid select{
+  .grid td{padding:3px 8px; border-bottom:1px solid #eaeef2; vertical-align:middle;}
+  .grid td.num, .grid th.num{text-align:right;}
+  .grid tr:hover td{background:#f6f8fa;}
+  .grid tr.sel td{background:#ddf4ff;}
+  .grid tr.in-cycle td:first-child{border-left:3px solid #ff9800;}
+  .grid tr.in-cycle td:first-child::after{content:' ⟳'; color:#ff9800;}
+  .grid input[type=text], .grid input[type=number], .grid select{
     width:100%; min-width:60px; padding:3px 5px; border:1px solid transparent; border-radius:5px; background:transparent;
   }
-  #grid input:hover, #grid select:hover{border-color:var(--border); background:#fff;}
-  #grid input:focus, #grid select:focus{border-color:var(--accent); background:#fff; outline:none;}
-  #grid input[type=number]{text-align:right; max-width:80px;}
-  #grid .ttc{font-variant-numeric:tabular-nums; white-space:nowrap;}
-  #grid .rel{color:var(--muted); max-width:170px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
-  #grid .ord{color:var(--muted); font-variant-numeric:tabular-nums;}
+  .grid input:hover, .grid select:hover{border-color:var(--border); background:#fff;}
+  .grid input:focus, .grid select:focus{border-color:var(--accent); background:#fff; outline:none;}
+  .grid input[type=number]{text-align:right; max-width:80px;}
+  .grid .ttc{font-variant-numeric:tabular-nums; white-space:nowrap;}
+  .grid .rel{color:var(--muted); max-width:170px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+  .grid .ord{color:var(--muted); font-variant-numeric:tabular-nums;}
+
+  /* ---------- Data table drawer (v1.1) ---------- */
+  #drawer{display:none; position:fixed; left:0; right:0; bottom:0; z-index:15;
+    background:#fff; border-top:1px solid var(--border); box-shadow:0 -6px 18px rgba(31,35,40,.10);}
+  #drawerGrab{height:26px; display:flex; align-items:center; justify-content:center;
+    font-size:12px; color:var(--muted); cursor:pointer; user-select:none;
+    background:#f6f8fa; border-bottom:1px solid var(--border);}
+  #drawerGrab:hover{color:var(--accent);}
+  #drawerBody{display:none; height:200px; overflow:auto; padding:0 22px 12px;}
+  body.drawer-open #drawerBody{display:block;}
+  /* stage bottom inset always equals the drawer's rendered height — it pushes
+     content up, never overlays blocks (26px grabber / 226px open) */
+  body.drawer-shut #stage{inset:46px 0 26px 0;}
+  body.drawer-open #stage{inset:46px 0 226px 0;}
+  body.drawer-shut #toasts{bottom:48px;}
+  body.drawer-open #toasts{bottom:248px;}
 
   /* ---------- Property panel ---------- */
   #panel{
@@ -255,6 +271,8 @@
         <option value="curved">Curved</option>
       </select>
     </label>
+    <button class="tbtn" id="badgesBtn" title="Show owner & stack on blocks">Badges</button>
+    <button class="tbtn" id="drawerBtn" title="Data table drawer (B)">Table ▾</button>
   </div>
   <div class="tb-group">
     <div class="dd" id="addDD">
@@ -291,6 +309,10 @@
 
 <div id="stage"><svg id="svg" tabindex="0"></svg></div>
 <div id="tableWrap"></div>
+<div id="drawer">
+  <div id="drawerGrab" title="Toggle data table (B)">▴ Data table</div>
+  <div id="drawerBody"></div>
+</div>
 
 <div id="panel">
   <header>
@@ -322,7 +344,7 @@
 /* ---------------- Constants ---------------- */
 const SVGNS = 'http://www.w3.org/2000/svg';
 const LS_KEY = 'flowmap.v1';
-const APP_VERSION = '1.0.0';
+const APP_VERSION = '1.1.0';
 const REPO_URL = 'https://github.com/processflowmap/flowmap';
 const FEEDBACK_URL = REPO_URL + '/issues/new/choose';   // single edit point for feedback links
 const HINT_KEY = 'flowmap.v1.hintSeen';
@@ -376,7 +398,7 @@ function newDoc(){
     blocks:[], edges:[],
     matrix:{ xProp:'ownerTeam', yProp:'softwareStack' },
     views:{ canvas:{tx:60, ty:60, k:1}, matrix:{tx:0, ty:0, k:1}, hybrid:{tx:0, ty:0, k:1}, table:{tx:0, ty:0, k:1} },
-    ui:{ panelCollapsed:false },
+    ui:{ panelCollapsed:false, showMeta:true, drawerOpen:false },
   };
 }
 /* Fill fields introduced after older saves were written */
@@ -465,6 +487,7 @@ function updateUndoBtns(){
 function afterMutation(){
   computeCycles();
   render();
+  renderDrawerTable();   // v1.1: drawer rebuild lives here, never in render()
   save();
 }
 
@@ -641,8 +664,9 @@ function shapeEl(b, parent){
   return n;
 }
 
-function truncate(text, px){
-  const maxChars = Math.max(2, Math.floor(px / 7));
+/* cw = average character width in px (7 suits the 13px label; ~5.5 for 10px badges) */
+function truncate(text, px, cw){
+  const maxChars = Math.max(2, Math.floor(px / (cw || 7)));
   text = String(text ?? '');
   return text.length > maxChars ? text.slice(0, maxChars - 1) + '…' : text;
 }
@@ -669,6 +693,7 @@ function render(){
 
   renderOverlay();
   $('#zoomPct').textContent = Math.round(view().k * 100) + '%';
+  syncTableSel();   // v1.1: cheap class-only drawer highlight sync (no rebuild)
 }
 
 /* ---------- grid / matrix / hybrid backdrop ---------- */
@@ -952,6 +977,25 @@ function renderEdge(e){
 }
 
 /* ---------- blocks ---------- */
+/* Metadata badges beneath the block label (v1.1 — canvas mode only; in
+   Matrix/Hybrid the axis headers already convey these values). Line 1 = owner
+   team, line 2 = software stack; blocks shorter than 70px get ONE combined
+   line so nothing clips (smallest shape: terminator, h=56). */
+function badgeLines(b){
+  if(doc.mode !== 'canvas' || !doc.ui.showMeta) return [];
+  const team = (b.ownerTeam || '').trim(), stack = (b.softwareStack || '').trim();
+  if(!team && !stack) return [];
+  if(b.h < 70) return [team && stack ? team + ' · ' + stack : team || stack];
+  return [team, stack].filter(Boolean);
+}
+/* baseline offsets vs b.h/2: label sits centered (+4.5) without badges and
+   shifts up to make room when badges are present */
+function badgeLayout(n){
+  return n === 0 ? { label:4.5, lines:[] }
+       : n === 1 ? { label:-3, lines:[11] }
+                 : { label:-9, lines:[4, 16] };
+}
+
 function renderBlock(b){
   const p = blockPos(b);
   const g = el('g', { class:'block', 'data-id':b.id, transform:`translate(${p.x},${p.y})` }, gBlocks);
@@ -979,10 +1023,17 @@ function renderBlock(b){
 
   if(isCycle){ const t = el('title', null, g); t.textContent = 'Part of a loop.'; }
 
-  // label
-  const t = el('text', { x:b.w/2, y:b.h/2 + 4.5, 'text-anchor':'middle', 'font-size':13,
+  // label + metadata badges
+  const badges = badgeLines(b);
+  const bl = badgeLayout(badges.length);
+  const t = el('text', { x:b.w/2, y:b.h/2 + bl.label, 'text-anchor':'middle', 'font-size':13,
     fill:'#1f2328', 'pointer-events':'none' }, g);
   t.textContent = truncate(b.label || '(untitled)', b.w - 22);
+  badges.forEach((s, i) => {
+    const bt = el('text', { x:b.w/2, y:b.h/2 + bl.lines[i], 'text-anchor':'middle', 'font-size':10,
+      fill:'#57606a', 'pointer-events':'none' }, g);
+    bt.textContent = truncate(s, b.w - 16, 5.5);
+  });
 
   // leads
   el('circle', { class:'lead lead-in',  'data-id':b.id, cx:0,    cy:b.h/2, r:5.5 }, g);
@@ -1019,42 +1070,66 @@ function renderOverlay(){
    Table view — activities in approximate flow order, properties
    as editable fields. Time to complete is computed (read-only).
    ============================================================ */
-function renderTable(){
-  const wrap = $('#tableWrap');
+/* One builder, two containers: #tableWrap gets every column, the v1.1 drawer
+   gets the abridged set (Type/Owner person/Location/Scope/Precedents/
+   Dependents stay exclusive to full Table mode). */
+const TABLE_COLS = [
+  ['num','#'], ['label','Label'], ['type','Type'], ['ownerTeam','Owner team'],
+  ['ownerPerson','Owner person'], ['softwareStack','Software stack'], ['criticality','Criticality'],
+  ['location','Location'], ['scope','Scope'], ['manHours','Man-hours'], ['resources','Resources'],
+  ['ttc','Time to complete'], ['pre','Precedents'], ['dep','Dependents'],
+];
+const DRAWER_COLS = ['num','label','ownerTeam','softwareStack','criticality','manHours','resources','ttc'];
+const NUM_COLS = new Set(['num','manHours','resources','ttc']);
+
+function buildTableHTML(abridged){
   const rows = flowOrder();
   const teamOpts = enumOptions('ownerTeam'), stackOpts = enumOptions('softwareStack');
   const relList = arr => arr.map(x => esc(x.label)).join(', ') || '—';
-  let html = `<table id="grid"><thead><tr>
-    <th class="num">#</th><th>Label</th><th>Type</th><th>Owner team</th><th>Owner person</th>
-    <th>Software stack</th><th>Criticality</th><th>Location</th><th>Scope</th>
-    <th class="num">Man-hours</th><th class="num">Resources</th><th class="num">Time to complete</th>
-    <th>Precedents</th><th>Dependents</th></tr></thead><tbody>`;
+  const HEAD = Object.fromEntries(TABLE_COLS);
+  const cols = abridged ? DRAWER_COLS : TABLE_COLS.map(c => c[0]);
+  let html = `<table class="grid"><thead><tr>` +
+    cols.map(c => `<th${NUM_COLS.has(c) ? ' class="num"' : ''}>${HEAD[c]}</th>`).join('') +
+    `</tr></thead><tbody>`;
   rows.forEach((b, i) => {
-    const ttc = timeToComplete(b);
-    html += `<tr data-id="${b.id}" class="${sel.blocks.has(b.id) ? 'sel' : ''} ${cycleSet.blocks.has(b.id) ? 'in-cycle' : ''}"
-      ${cycleSet.blocks.has(b.id) ? 'title="Part of a loop."' : ''}>
-      <td class="ord">${i + 1}</td>
-      <td><input type="text" data-prop="label" value="${esc(b.label)}"></td>
-      <td>${BLOCK_TYPES[b.type].name}</td>
-      <td><select data-prop="ownerTeam">${enumHtml(teamOpts, b.ownerTeam)}</select></td>
-      <td><input type="text" data-prop="ownerPerson" value="${esc(b.ownerPerson)}"></td>
-      <td><select data-prop="softwareStack">${enumHtml(stackOpts, b.softwareStack)}</select></td>
-      <td><select data-prop="criticality">${CRITS.map(c => `<option value="${c}" ${c === b.criticality ? 'selected' : ''}>${c || '— unset —'}</option>`).join('')}</select></td>
-      <td><input type="text" data-prop="location" value="${esc(b.location)}"></td>
-      <td><input type="text" data-prop="scope" value="${esc(b.scope)}"></td>
-      <td class="num"><input type="number" data-prop="manHours" min="0" step="0.5" value="${b.manHours ?? ''}"></td>
-      <td class="num"><input type="number" data-prop="resources" min="1" step="1" value="${b.resources ?? ''}"></td>
-      <td class="num ttc">${fmtHours(ttc)}</td>
-      <td class="rel" title="${esc(relList(precedentsOf(b.id)))}">${esc(relList(precedentsOf(b.id)))}</td>
-      <td class="rel" title="${esc(relList(dependentsOf(b.id)))}">${esc(relList(dependentsOf(b.id)))}</td>
-    </tr>`;
+    const cell = {
+      num: `<td class="ord">${i + 1}</td>`,
+      label: `<td><input type="text" data-prop="label" value="${esc(b.label)}"></td>`,
+      type: `<td>${BLOCK_TYPES[b.type].name}</td>`,
+      ownerTeam: `<td><select data-prop="ownerTeam">${enumHtml(teamOpts, b.ownerTeam)}</select></td>`,
+      ownerPerson: `<td><input type="text" data-prop="ownerPerson" value="${esc(b.ownerPerson)}"></td>`,
+      softwareStack: `<td><select data-prop="softwareStack">${enumHtml(stackOpts, b.softwareStack)}</select></td>`,
+      criticality: `<td><select data-prop="criticality">${CRITS.map(c => `<option value="${c}" ${c === b.criticality ? 'selected' : ''}>${c || '— unset —'}</option>`).join('')}</select></td>`,
+      location: `<td><input type="text" data-prop="location" value="${esc(b.location)}"></td>`,
+      scope: `<td><input type="text" data-prop="scope" value="${esc(b.scope)}"></td>`,
+      manHours: `<td class="num"><input type="number" data-prop="manHours" min="0" step="0.5" value="${b.manHours ?? ''}"></td>`,
+      resources: `<td class="num"><input type="number" data-prop="resources" min="1" step="1" value="${b.resources ?? ''}"></td>`,
+      ttc: `<td class="num ttc">${fmtHours(timeToComplete(b))}</td>`,
+      pre: `<td class="rel" title="${esc(relList(precedentsOf(b.id)))}">${esc(relList(precedentsOf(b.id)))}</td>`,
+      dep: `<td class="rel" title="${esc(relList(dependentsOf(b.id)))}">${esc(relList(dependentsOf(b.id)))}</td>`,
+    };
+    const inCycle = cycleSet.blocks.has(b.id);
+    html += `<tr data-id="${b.id}" class="${sel.blocks.has(b.id) ? 'sel' : ''} ${inCycle ? 'in-cycle' : ''}"
+      ${inCycle ? 'title="Part of a loop."' : ''}>` + cols.map(c => cell[c]).join('') + `</tr>`;
   });
-  html += `</tbody></table>`;
-  wrap.innerHTML = html;
+  return html + `</tbody></table>`;
+}
+function renderTable(){ $('#tableWrap').innerHTML = buildTableHTML(false); }
+
+/* v1.1 — drawer table is rebuilt ONLY here and from applyDrawer (open/mode
+   change), both driven by afterMutation — never from render(), which fires on
+   every wheel-zoom tick. Selection highlight syncs via class toggles only. */
+function renderDrawerTable(){
+  if(doc.mode === 'table' || !doc.ui.drawerOpen) return;
+  $('#drawerBody').innerHTML = buildTableHTML(true);
+}
+function syncTableSel(){
+  document.querySelectorAll('#drawerBody tr[data-id]').forEach(tr =>
+    tr.classList.toggle('sel', sel.blocks.has(tr.getAttribute('data-id'))));
 }
 
 // cell edits (delegated — fires on 'change', i.e. after editing is done)
-$('#tableWrap').addEventListener('change', ev => {
+function onGridChange(ev){
   const t = ev.target, tr = t.closest('tr');
   if(!tr || !t.dataset.prop) return;
   const b = blockById(tr.getAttribute('data-id'));
@@ -1070,9 +1145,9 @@ $('#tableWrap').addEventListener('change', ev => {
   else if(prop === 'resources') b.resources = t.value === '' ? null : Math.max(1, Math.round(Number(t.value)));
   else b[prop] = t.value.trim();
   afterMutation(); renderPanel();
-});
+}
 // row selection (clicking outside of editors)
-$('#tableWrap').addEventListener('click', ev => {
+function onGridClick(ev){
   if(ev.target.matches('input, select, textarea')) return;
   const tr = ev.target.closest('tr[data-id]');
   if(!tr) return;
@@ -1080,7 +1155,12 @@ $('#tableWrap').addEventListener('click', ev => {
   if(ev.shiftKey){ sel.blocks.has(id) ? sel.blocks.delete(id) : sel.blocks.add(id); sel.edges.clear(); renderPanel(); render(); }
   else selectOnly('block', id);
   render();
-});
+}
+// one code path, two containers (full Table view + v1.1 drawer)
+for(const c of [$('#tableWrap'), $('#drawerBody')]){
+  c.addEventListener('change', onGridChange);
+  c.addEventListener('click', onGridClick);
+}
 
 /* ============================================================
    Interactions
@@ -1381,7 +1461,9 @@ svg.addEventListener('dblclick', ev => {
   const sp = worldToScreen(p.x, p.y);
   const inp = $('#inlineEdit');
   inp.style.display = 'block';
-  inp.style.left = sp.x + 'px'; inp.style.top = (sp.y + b.h/2*view().k - 14) + 'px';
+  // track the label's vertical position (it shifts up when badges are shown)
+  const lift = 4.5 - badgeLayout(badgeLines(b).length).label;
+  inp.style.left = sp.x + 'px'; inp.style.top = (sp.y + (b.h/2 - lift)*view().k - 14) + 'px';
   inp.style.width = Math.max(120, b.w * view().k) + 'px';
   inp.value = b.label;
   inp.focus(); inp.select();
@@ -1405,6 +1487,7 @@ window.addEventListener('keydown', ev => {
   else if(mod && (ev.key.toLowerCase() === 'y' || (ev.shiftKey && ev.key.toLowerCase() === 'z'))){ redo(); ev.preventDefault(); }
   else if(mod && ev.key.toLowerCase() === 'd'){ duplicateSelected(); ev.preventDefault(); }
   else if(ev.key === 'Delete' || ev.key === 'Backspace'){ deleteSelected(); ev.preventDefault(); }
+  else if(!mod && ev.key.toLowerCase() === 'b'){ toggleDrawer(); ev.preventDefault(); }
   else if(ev.key === '?'){ showShortcuts(); ev.preventDefault(); }
   else if(ev.key === 'Escape'){ clearSel(); hideLeadPop(); render(); }
 });
@@ -1425,6 +1508,9 @@ function applyPanelVisibility(){
   const collapsed = open && doc.ui.panelCollapsed;
   panel.classList.toggle('collapsed', collapsed);
   $('#panelTab').style.display = collapsed ? 'block' : 'none';
+  // v1.1: the panel (z25) sits above the drawer (z15) — pull the drawer's
+  // right edge clear of it so no cell is ever hidden behind the panel
+  $('#drawer').style.right = (open && !collapsed) ? panel.offsetWidth + 'px' : '0';
 }
 $('#panelCollapse').addEventListener('click', () => { doc.ui.panelCollapsed = true; save(); applyPanelVisibility(); });
 $('#panelTab').addEventListener('click', () => { doc.ui.panelCollapsed = false; save(); applyPanelVisibility(); });
@@ -1574,7 +1660,7 @@ function setMode(m){
   if(doc.mode === m) return;
   doc.mode = m;
   setModeUI(m);
-  save(); render();
+  save(); applyDrawer(); render();
 }
 $('#modeCanvas').addEventListener('click', () => setMode('canvas'));
 $('#modeMatrix').addEventListener('click', () => setMode('matrix'));
@@ -1585,6 +1671,38 @@ $('#edgeStyle').addEventListener('change', ev => {
   doc.edgeStyle = ev.target.value;
   save(); render();
 });
+
+/* v1.1 — view-preference toggles. No commit(): these are not doc mutations
+   (same pattern as panelCollapsed) — persist, update chrome, re-render. */
+function applyBadgesBtn(){ $('#badgesBtn').classList.toggle('active', !!doc.ui.showMeta); }
+$('#badgesBtn').addEventListener('click', () => {
+  doc.ui.showMeta = !doc.ui.showMeta;
+  save(); applyBadgesBtn(); render();
+});
+
+/* Bottom data-table drawer: visible in every graphical mode, hidden entirely
+   in Table mode (redundant there). Collapsed = 26px grabber; open = +200px. */
+function drawerAvailable(){ return doc.mode !== 'table'; }
+function applyDrawer(){
+  const avail = drawerAvailable();
+  const open = avail && !!doc.ui.drawerOpen;
+  $('#drawer').style.display = avail ? 'block' : 'none';
+  document.body.classList.toggle('drawer-open', open);
+  document.body.classList.toggle('drawer-shut', avail && !open);
+  $('#drawerGrab').textContent = (open ? '▾' : '▴') + ' Data table';
+  const btn = $('#drawerBtn');
+  btn.classList.toggle('active', open);
+  btn.disabled = !avail;
+  applyPanelVisibility();   // panel covers the drawer's right edge when open
+  if(open) renderDrawerTable();
+}
+function toggleDrawer(){
+  if(!drawerAvailable()) return;
+  doc.ui.drawerOpen = !doc.ui.drawerOpen;
+  save(); applyDrawer(); render();
+}
+$('#drawerGrab').addEventListener('click', toggleDrawer);
+$('#drawerBtn').addEventListener('click', toggleDrawer);
 
 function fillAxisDropdowns(){
   for(const id of ['#axisX','#axisY']){
@@ -1711,6 +1829,8 @@ $('#fileInput').addEventListener('change', ev => {
       clearSel();
       setModeUI(doc.mode);
       $('#edgeStyle').value = doc.edgeStyle;
+      applyBadgesBtn();
+      applyDrawer();
       afterMutation();
       toast('Diagram imported');
     }catch(err){ toast('Invalid flowmap JSON file'); }
@@ -1763,6 +1883,7 @@ function showHint(){
     <h2>Welcome to FlowMap</h2>
     <p>This is a sample process. Everything is editable and stays in your browser — no account needed.</p>
     <p>Try switching modes above: blocks auto-arrange into a Matrix, flow-ordered Hybrid lanes, and an editable Table.</p>
+    <p>Blocks carry their data — owner and stack show right on the canvas; toggle with the Badges button.</p>
     <div class="card-actions">
       <button class="btn-primary" id="hintStart">Start exploring</button>
       <button class="linklike" id="hintNever">Don't show again</button>
@@ -1824,6 +1945,8 @@ function showShortcuts(){
     <div class="sc-group"><h3>View</h3><ul>
       <li>Mouse-wheel zooms to cursor</li>
       <li>Middle-drag or <kbd>Space</kbd>+drag to pan</li>
+      <li><kbd>B</kbd> toggles the data table drawer</li>
+      <li>Badges button shows owner &amp; stack on blocks</li>
       <li><kbd>?</kbd> opens this sheet</li>
     </ul></div>
     <div class="sc-group"><h3>Modes</h3><ul>
@@ -1835,12 +1958,12 @@ function showShortcuts(){
 function showWhatsNew(){
   showCard(`<h2>What's new in v${APP_VERSION} <button class="x">✕</button></h2>
   <ul style="padding-left:18px; margin-bottom:8px">
-    <li>Four views of the same data: Canvas, Matrix, Hybrid lanes, and an editable Table</li>
-    <li>Square (orthogonal) arrows by default, with a curved option</li>
-    <li>Effort fields: man-hours × assigned resources → calculated time to complete</li>
-    <li>Repeating flow-ordered lanes in Hybrid view</li>
-    <li>Installable, fully offline app (PWA) — everything stays on your device</li>
-  </ul>`);
+    <li><b>Data on the blocks:</b> owner team &amp; software stack show right on canvas blocks — toggle with the Badges button</li>
+    <li><b>Data table drawer:</b> an abridged, editable table docked below Canvas/Matrix/Hybrid — press <kbd>B</kbd> or click the grabber at the bottom</li>
+  </ul>
+  <p style="color:var(--muted); font-size:12px">v1.0: four views of the same data · square (orthogonal) arrows with a curved option ·
+    effort fields with calculated time to complete · repeating flow-ordered Hybrid lanes ·
+    installable, fully offline PWA — everything stays on your device.</p>`);
 }
 function showAbout(){
   showCard(`<h2>About &amp; Privacy <button class="x">✕</button></h2>
@@ -1903,6 +2026,8 @@ function init(){
   fillAxisDropdowns();
   setModeUI(doc.mode);
   $('#edgeStyle').value = doc.edgeStyle;
+  applyBadgesBtn();
+  applyDrawer();
   computeCycles();
   render();
   updateUndoBtns();
