@@ -1,5 +1,5 @@
 /* FlowMap service worker — cache-first, fully offline after first visit. */
-const CACHE = 'flowmap-v2';
+const CACHE = 'flowmap-v7';
 const ASSETS = [
   './',
   './index.html',
